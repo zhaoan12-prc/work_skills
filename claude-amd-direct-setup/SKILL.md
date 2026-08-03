@@ -1,147 +1,116 @@
 ---
 name: claude-amd-direct-setup
-description: Install, configure, repair, and verify Claude Code against AMD LLM Gateway in direct mode. Use when the user mentions Claude Code, AMD LLM Gateway, ANTHROPIC_BASE_URL, ANTHROPIC_CUSTOM_HEADERS, 401 missing subscription key, which claude, claude-route, or claude -p, or when Claude must be forced through a wrapper entrypoint.
+description: Installs, repairs, and verifies Claude Code against the direct AMD LLM Gateway. Use for AMD Gateway authentication, missing subscription-key errors, apiKeyHelper failures, wrong Claude entrypoints, upgrades that bypass wrappers, stale Claude binaries, or claude-route and claude -p diagnostics.
 ---
 
 # Claude AMD Direct Setup
 
-## Purpose
+Configure Claude Code so `claude` always reaches the AMD Anthropic-compatible
+gateway with the subscription-key header. Keep secrets outside repositories and
+prove success with a real request.
 
-Provide a reusable, local-first workflow for connecting Claude Code directly to AMD LLM Gateway. The intended end state is:
+## Required end state
 
-- `claude` always goes through a wrapper before invoking the real Claude Code binary
-- `~/.claude/amd-gateway.env` stores the gateway key for non-interactive wrapper use
-- `~/.claude/settings.json` keeps only `apiKeyHelper` and `model`
-- only the direct AMD Anthropic endpoint is used, with no local proxy fallback
-- only `claude-sonnet-4.6` and `claude-opus-4.6` are treated as supported direct models
-- validation always includes a real `claude -p` request, not just route inspection or a healthcheck
-- if the official installer downloads the binary but hangs during the final install step, setup can still be completed by wiring the downloaded binary into the wrapper flow
-
-## When to Use
-
-- first-time Claude Code installation or reinstallation is needed
-- Claude must be locked to AMD Gateway direct mode
-- `401 missing subscription key` appears
-- `which claude` resolves to the wrong entrypoint and bypasses the wrapper
-- `claude-route` looks correct but real `claude -p` requests still fail
-- `/model` persisted an AMD-incompatible alias such as `opus[1m]`
-
-## Prerequisites
-
-The wrapper does not need to be prepared in advance. This skill should create or repair the wrapper after Claude Code itself is installed.
-
-Required conditions:
-
-- `bash`, `curl`, and `python3` are available
-- the machine can reach the Claude installer and AMD Gateway endpoints
-- the user provides `AMD_LLM_GATEWAY_KEY` if automatic local setup is expected
-- there is a writable location for the wrapper, usually `/usr/local/bin`
-- if `/usr/local/bin` is not usable, pick another stable directory already on `PATH` and ensure `which claude` resolves there
-
-## Non-Negotiable Rules
-
-1. Never write a real gateway key into repository files or print it in output.
-2. Always ask for `AMD_LLM_GATEWAY_KEY` before editing any local secret-bearing config.
-3. If the user does not provide the key, stop automatic setup and switch to placeholder-only manual guidance.
-4. Keep secrets in user-local files, preferably `~/.claude/amd-gateway.env`, not in the repository.
-5. Install Claude Code first, then create or repair the wrapper:
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-6. The wrapper must export both of these variables:
+- Official Claude Code remains at `~/.local/bin/claude`.
+- The stable wrapper is `~/bin/claude`.
+- `~/bin` precedes `~/.local/bin` in `PATH`.
+- The wrapper loads `~/.claude/amd-gateway.env`.
+- The wrapper exports:
 
 ```bash
 export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"
 export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${AMD_LLM_GATEWAY_KEY}"
 ```
 
-7. The second line is critical. `ANTHROPIC_CUSTOM_HEADERS` must be a single string, not JSON.
-8. Do not rely only on the default `Authorization` or `X-Api-Key` behavior from `apiKeyHelper`.
-9. Keep `~/.claude/settings.json` limited to `apiKeyHelper` and `model`.
-10. Default to `claude-sonnet-4.6`. Use `claude-opus-4.6` as the high-tier direct model.
-11. If `~/.local/bin` appears earlier in `PATH`, make the `claude` binary there point to the wrapper as well.
-12. Never claim success from `claude-route` or healthcheck alone. Run real `claude -p` validation.
-13. Do not rely on `~/.bashrc` as the primary secret store. Many `.bashrc` files return early for non-interactive shells.
-14. If `.bashrc` must be used, place the key export before any `[ -z "$PS1" ] && return` line.
-15. When sourcing user shell files from a wrapper that uses `set -u`, temporarily disable nounset around the `source`.
+- `~/.claude/settings.json` contains only `apiKeyHelper` and a supported model.
+- A real `claude -p` request succeeds.
 
-## Preferred Local Layout
+This layout is intentional. The official updater owns
+`~/.local/bin/claude`; putting the wrapper there causes the next update to
+silently replace it. A separate `~/bin/claude` wrapper survives updates while
+always invoking the newest official binary.
 
-- `~/.claude/amd-gateway.env`
-  - stores only `export AMD_LLM_GATEWAY_KEY="PASTE_YOUR_KEY_HERE"` and is chmod `600`
-- `~/.bashrc`
-  - optional fallback only; if used, the key export must appear before non-interactive early returns
-- `~/.claude/settings.json`
-  - stores only `apiKeyHelper` and the selected direct model
-- `/usr/local/bin/claude`
-  - wrapper that loads `~/.claude/amd-gateway.env`, normalizes bad aliases, and forwards to the real Claude binary
-- `/usr/local/bin/claude-route`
-  - route inspector that reports direct mode, normalized model, and entrypoint information
-- `/usr/local/bin/claude.real`
-  - the real Claude Code binary, or a symlink to the official downloaded binary
-- `~/.local/bin/claude`
-  - if this location can win in `PATH`, link it to the wrapper too
+## Supported direct models
 
-## Setup And Repair Workflow
+Use only:
 
-### Step 1: Inspect current state
+- `claude-sonnet-4.6` (default)
+- `claude-opus-4.6`
 
-Check the machine without leaking the key:
+Normalize `opus[1m]`, `claude-opus-4.5[1m]`, retired models, and unknown values
+to `claude-sonnet-4.6`, unless the user explicitly requests the supported Opus
+model.
 
-- `claude --version`
-- `which claude`
-- `which claude-route`
-- `claude-route`
-- `echo "${AMD_LLM_GATEWAY_KEY:+set}"`
-- `test -f ~/.claude/amd-gateway.env && echo env_file_exists`
-- `bash ".cursor/skills/claude-amd-direct-setup/scripts/healthcheck.sh"`
+## Safety rules
 
-Never print the real key. Only confirm whether it is set.
+1. Ask for `AMD_LLM_GATEWAY_KEY` before writing secret-bearing files.
+2. Never print the key or put it in commands that may enter shell history.
+3. Store it only in `~/.claude/amd-gateway.env`, mode `600`.
+4. Never put a real key in a repository, `SKILL.md`, logs, or test output.
+5. Do not use `apiKeyHelper` as the gateway authentication mechanism. AMD
+   requires `Ocp-Apim-Subscription-Key` through `ANTHROPIC_CUSTOM_HEADERS`.
+6. Do not claim success from configuration inspection or `claude-route`; run
+   a real `claude -p` request.
+7. Do not overwrite an official binary until its version and replacement have
+   been identified.
 
-### Step 2: Ask for the key if needed
+## Workflow
 
-If `AMD_LLM_GATEWAY_KEY` is missing:
+### 1. Inspect without leaking credentials
 
-- say that the key is still needed
-- explain that the real key will be written only to local user files
-- if the user does not want to share it, switch to `PASTE_YOUR_KEY_HERE` manual steps
+Run:
 
-### Step 3: Install Claude Code first
+```bash
+command -v claude
+readlink -f "$(command -v claude)"
+claude --version
+test -x "$HOME/.local/bin/claude" && "$HOME/.local/bin/claude" --version
+test -f "$HOME/.claude/amd-gateway.env" && echo env_file_exists
+bash work_skills/claude-amd-direct-setup/scripts/healthcheck.sh
+```
 
-Run the official installer first:
+Interpret entrypoints carefully:
+
+- Healthy: `command -v claude` is `~/bin/claude`.
+- Bypassed wrapper: it resolves to `~/.local/bin/claude`.
+- Legacy layout: it resolves to `/usr/local/bin/claude`, often forwarding to a
+  stale `/usr/local/bin/claude.real`.
+
+Check running sessions separately. Configuration is not hot-reloaded; old
+Claude processes must be restarted.
+
+### 2. Install or update the official binary first
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-Operational notes based on real setup experience:
-
-- the installer may download the binary into `~/.claude/downloads/` and then hang during the final `install` subprocess
-- if that happens, do not blindly rerun the installer over and over
-- first check whether `~/.claude/downloads/claude-*-linux-x64` exists and is executable
-- run `~/.claude/downloads/claude-*-linux-x64 --version`
-- if the binary works, copy it to a stable temporary path such as `/usr/local/bin/claude.real.tmp` before killing the stuck installer
-- the installer may clean `~/.claude/downloads/` when interrupted, so preserve the binary first
-- if the binary works, wire it into `claude.real` and continue with wrapper setup
-- if the downloaded binary is gone, directly download the same release URL shown in the installer process into `/usr/local/bin/claude.real`
-
-### Step 4: Write local config
-
-Preferred secret file:
+After installation, verify the official binary directly:
 
 ```bash
-mkdir -p ~/.claude
-cat > ~/.claude/amd-gateway.env <<'EOF'
-export AMD_LLM_GATEWAY_KEY="PASTE_YOUR_KEY_HERE"
-EOF
-chmod 600 ~/.claude/amd-gateway.env
+"$HOME/.local/bin/claude" --version
 ```
 
-Use `~/.bashrc` only as a fallback. If used, insert the export before any line like `[ -z "$PS1" ] && return`; appending to the end of `.bashrc` is often wrong for non-interactive wrappers.
+If installation downloads a binary and hangs, preserve the executable before
+stopping the installer. Do not replace a known-working binary with an
+unverified download.
 
-`~/.claude/settings.json` should keep only:
+### 3. Write the secret file
+
+Avoid passing the key as a command-line argument. Write it from a protected
+interactive input or an already populated environment variable:
+
+```bash
+mkdir -p "$HOME/.claude"
+umask 077
+printf 'export AMD_LLM_GATEWAY_KEY="%s"\n' "$AMD_LLM_GATEWAY_KEY" \
+  > "$HOME/.claude/amd-gateway.env"
+chmod 600 "$HOME/.claude/amd-gateway.env"
+```
+
+The file must contain one export and no extra output.
+
+### 4. Write minimal settings
 
 ```json
 {
@@ -150,204 +119,130 @@ Use `~/.bashrc` only as a fallback. If used, insert the export before any line l
 }
 ```
 
-Do not add extra auth fields. Model switching should happen here and nowhere else.
+`apiKeyHelper` satisfies Claude Code's external-key mode. The actual AMD
+gateway authentication still comes from `ANTHROPIC_CUSTOM_HEADERS`.
 
-### Step 5: Wrapper requirements
+Do not add `/Unified` settings from the legacy guide. This direct-mode skill
+uses `https://llm-api.amd.com/Anthropic`.
 
-The wrapper should do all of the following:
+### 5. Create the stable wrapper
 
-- if the current shell does not already have `AMD_LLM_GATEWAY_KEY`, first try loading `~/.claude/amd-gateway.env`
-- use `~/.bashrc` only as a fallback, and only after checking that the key is still missing
-- when sourcing user files under `set -u`, wrap the `source` with `set +u` and then restore `set -u`
-- export `ANTHROPIC_BASE_URL`
-- export `ANTHROPIC_CUSTOM_HEADERS`
-- normalize bad persisted model aliases into supported direct models
-- `exec` into the real Claude Code binary
-
-Minimum safe source pattern:
+Create `~/bin/claude` with this behavior:
 
 ```bash
-if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" && -f "${HOME}/.claude/amd-gateway.env" ]]; then
+#!/usr/bin/env bash
+set -euo pipefail
+
+env_file="${HOME}/.claude/amd-gateway.env"
+real_claude="${HOME}/.local/bin/claude"
+
+if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" && -f "$env_file" ]]; then
   set +u
-  source "${HOME}/.claude/amd-gateway.env"
+  source "$env_file"
   set -u
 fi
 
-if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" && -f "${HOME}/.bashrc" ]]; then
-  set +u
-  source "${HOME}/.bashrc"
-  set -u
+if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" ]]; then
+  echo "AMD gateway key is missing: $env_file" >&2
+  exit 1
 fi
+if [[ ! -x "$real_claude" ]]; then
+  echo "Official Claude binary is missing: $real_claude" >&2
+  exit 1
+fi
+
+export CLAUDE_AMD_WRAPPER=1
+export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"
+export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${AMD_LLM_GATEWAY_KEY}"
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+
+exec "$real_claude" "$@"
 ```
 
-Minimum alias normalization rules:
-
-- `opus[1m]` -> `claude-opus-4.6`
-- `claude-opus-4.5[1m]` -> `claude-opus-4.6`
-- any other unknown value -> `claude-sonnet-4.6`
-
-### Step 6: Ensure the real entrypoint is the wrapper
-
-Always check:
+Make it executable:
 
 ```bash
-which claude
+chmod 700 "$HOME/bin/claude"
 ```
 
-If the result is not the expected wrapper:
+Never make `~/.local/bin/claude` point back to this wrapper; that creates an
+updater conflict and can create recursion.
 
-- fix `PATH` ordering, or
-- point `~/.local/bin/claude` to the wrapper, or
-- replace whichever `claude` binary wins first on `PATH` with the wrapper
+### 6. Fix PATH ordering
 
-Do not assume `/usr/local/bin/claude` will always be chosen.
-
-### Step 7: Verify in the correct order
-
-Use this validation order exactly:
-
-1. Route inspection first:
+Ensure `~/bin` comes before `~/.local/bin`:
 
 ```bash
-claude-route
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 ```
 
-Expected direct-mode indicators:
-
-- `"mode": "direct"`
-- `"backend": "claude-amd-anthropic"`
-- `"custom_headers": "set"`
-- `"normalized_model": "claude-sonnet-4.6"` or `"claude-opus-4.6"`
-- `"which_claude"` points to the wrapper entrypoint
-- `"real_version"` reports a working Claude Code binary
-
-2. Then run a real text request:
+Persist the equivalent once in the appropriate shell startup file. Remove
+duplicate or reversed PATH fragments. Then clear command lookup caching:
 
 ```bash
-claude -p --output-format json 'Reply with exactly OK'
+hash -r
+command -v claude
 ```
 
-3. Then verify the reported model:
+### 7. Verify in order
+
+First run the non-secret healthcheck:
 
 ```bash
-claude -p --output-format json 'Reply with exactly OK' | \
-  python3 ".cursor/skills/claude-amd-direct-setup/scripts/verify_output_model.py"
+bash work_skills/claude-amd-direct-setup/scripts/healthcheck.sh
 ```
 
-4. Finally verify tool use:
+Then run a real request:
+
+```bash
+claude -p --output-format json 'Reply with exactly: API OK'
+```
+
+Verify the response model:
+
+```bash
+claude -p --output-format json 'Reply with exactly: API OK' |
+  python3 work_skills/claude-amd-direct-setup/scripts/verify_output_model.py
+```
+
+Finally verify tool use when required:
 
 ```bash
 claude -p --output-format json --allowedTools Bash -- \
-  'Use the Bash tool to run pwd, then answer with only the absolute path.'
+  'Use Bash to run pwd, then answer with only the absolute path.'
 ```
 
-Do not stop at healthcheck. The setup is only truly complete when:
+Restart any Claude process that was already running before the repair.
 
-- the text request succeeds
-- `modelUsage` reports a supported 4.6 model
-- the Bash tool call succeeds
+## Failure diagnosis
 
-### Step 8: Fallback when the user does not provide the key
+- `apiKeyHelper script is failing`: the wrapper was bypassed, the env file is
+  missing, or the process predates the repair.
+- `Invalid API key`: the AMD key was sent to the official Anthropic endpoint;
+  check `command -v claude`, wrapper execution, and `ANTHROPIC_BASE_URL`.
+- `401 missing subscription key`: `ANTHROPIC_CUSTOM_HEADERS` is absent or not
+  the single string `Ocp-Apim-Subscription-Key: ...`.
+- Route inspection looks healthy but requests fail: route inspection is not
+  proof; inspect the real `claude -p` error.
+- Claude version becomes older after repair: a legacy wrapper is invoking
+  `/usr/local/bin/claude.real`; migrate to the user-local layout above.
+- A Claude update breaks routing: confirm the updater changed
+  `~/.local/bin/claude`, keep that binary intact, and restore PATH precedence
+  for `~/bin`.
+- Retired-model warning: normalize `~/.claude/settings.json`, then restart.
+- Experimental beta-header error: ensure
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is exported by the wrapper.
 
-Do not invent a fake key. Provide placeholder-only guidance and explicitly mention the local files that must be updated:
+## Completion checklist
 
-- `~/.claude/amd-gateway.env`
-- `~/.claude/settings.json`
-- the wrapper file
-
-If the user chooses the fallback `.bashrc` route, explicitly warn them that the export must appear before non-interactive early returns such as `[ -z "$PS1" ] && return`.
-
-## Supported Direct Models
-
-Use only these exact model names:
-
-- `claude-sonnet-4.6`
-- `claude-opus-4.6`
-
-Do not treat interactive `/model` as the final source of truth. For this direct setup, `~/.claude/settings.json` is the only reliable model switch location.
-
-## Common Failure Modes
-
-1. `401 missing subscription key`
-   - the first check is not whether the key itself is correct
-   - first confirm that `ANTHROPIC_CUSTOM_HEADERS` is set
-   - then confirm that it is the single string `Ocp-Apim-Subscription-Key: ...`
-   - do not store it as JSON
-
-2. `claude-route` looks healthy but the real request fails
-   - continue with `claude -p --output-format json ...`
-   - inspect the real API error instead of stopping at route output
-
-3. `which claude` points to the wrong binary
-   - inspect `PATH`
-   - inspect `~/.local/bin/claude`
-   - make sure the wrapper is the actual runtime entrypoint
-
-4. the official installer downloads the binary but hangs at the end
-   - inspect `~/.claude/downloads/claude-*-linux-x64`
-   - run `--version`
-   - if the binary works, copy it to a stable path before killing the stuck installer
-   - connect the preserved binary to `claude.real` and continue
-   - if the download was cleaned up, download the same release directly to `claude.real`
-
-5. `~/.claude/settings.json` was polluted by an old `/model` selection
-   - change it back to `claude-sonnet-4.6` or `claude-opus-4.6`
-   - or let the wrapper normalize it automatically at startup
-
-6. `claude-route` shows `settings_parse_error`
-   - launch `claude` once
-   - let the wrapper back up the invalid file and rewrite a minimal config
-
-7. the current shell still has stale environment
-   - reload `~/.claude/amd-gateway.env`
-   - reload `~/.bashrc` only if it is being used as the fallback store
-   - or open a new terminal before retesting
-
-8. healthcheck passes but Claude tool use still fails
-   - keep going with real `claude -p` and Bash tool validation
-   - without that, setup is not complete
-
-9. `claude-route` reports `custom_headers: missing_key`
-   - first check whether `~/.claude/amd-gateway.env` exists and is chmod `600`
-   - if the key was stored in `.bashrc`, check whether it appears after `[ -z "$PS1" ] && return`
-   - move the export above that early return, or migrate the key to `~/.claude/amd-gateway.env`
-
-10. wrapper fails with `PS1: unbound variable`
-   - the wrapper is sourcing shell startup files while `set -u` is active
-   - wrap each `source` call with `set +u` and then restore `set -u`
-
-## Manual Fallback Snippet
-
-If the user does not want to share the real key, use only a placeholder:
-
-```bash
-mkdir -p ~/.claude
-cat > ~/.claude/amd-gateway.env <<'EOF'
-export AMD_LLM_GATEWAY_KEY="PASTE_YOUR_KEY_HERE"
-EOF
-chmod 600 ~/.claude/amd-gateway.env
-```
-
-Never write the real key into project files.
-
-## Additional Resources
-
-- Usage examples: [examples.md](examples.md)
-- Environment and route validation: `scripts/healthcheck.sh`
-- Model output validation: `scripts/verify_output_model.py`
-
-## Validation Checklist
-
-- [ ] no real secret was added to repository files
-- [ ] the user was asked for the key before secret-bearing local edits
-- [ ] Claude Code was installed before wrapper configuration
-- [ ] `~/.claude/amd-gateway.env` stores the key and is chmod `600`, or `.bashrc` fallback is intentionally used before early returns
-- [ ] `~/.claude/settings.json` keeps only `apiKeyHelper` and `model`
-- [ ] the wrapper exports both `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS`
-- [ ] `ANTHROPIC_CUSTOM_HEADERS` is a string, not JSON
-- [ ] `which claude` resolves to the wrapper
-- [ ] if `~/.local/bin` is earlier in `PATH`, it also points to the wrapper
-- [ ] `claude-route` reports direct mode, `custom_headers: set`, and a supported 4.6 model
-- [ ] the real `claude -p` text request succeeds
-- [ ] `modelUsage` reports `claude-sonnet-4.6` or `claude-opus-4.6`
-- [ ] the Bash tool call succeeds, or any remaining limitation is stated clearly
+- [ ] No secret entered repository files or output.
+- [ ] `~/.claude/amd-gateway.env` exists with mode `600`.
+- [ ] `~/.local/bin/claude` is the current official binary.
+- [ ] `~/bin/claude` is the wrapper and is mode `700`.
+- [ ] `~/bin` precedes `~/.local/bin`.
+- [ ] The wrapper exports the AMD base URL and subscription header.
+- [ ] Settings contain only `apiKeyHelper` and a supported model.
+- [ ] Healthcheck passes.
+- [ ] A real text request succeeds.
+- [ ] Response model verification succeeds.
+- [ ] Existing Claude sessions were restarted.
