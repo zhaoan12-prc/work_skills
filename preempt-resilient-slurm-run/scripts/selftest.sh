@@ -78,6 +78,26 @@ echo 'PREFLIGHT_ON_UNKNOWN=warn' >> runconf.sh
 OUT="$(job 3002)"; saw 'PREFLIGHT_ON_UNKNOWN=warn，放行' && ok "warn 可显式放行" || bad "warn 显式放行" "没生效"
 cd /tmp && rm -rf "$T"
 
+echo "== 6. 运行期间原地改写脚本不影响正在跑的作业（SKILL.md 第 6 条）=="
+sandbox
+grep -qx '{' submit.sbatch && ok "脚本体被 { } 包住" || bad "脚本体被 { } 包住" "顶层没有单独的 { 行，改写防护失效"
+echo 'echo SELFTEST_MARKER; sleep 4' > queue/only.sh
+( job 6001 > run6.out 2>&1 ) & JP=$!
+sleep 2
+# 真·原地改写：`cat > file` 截断同一个 inode（sed -i 会换 inode，测不出来）
+{ head -1 submit.sbatch
+  for i in $(seq 1 60); do echo "# INSERTED $i ------------------------------------------"; done
+  tail -n +2 submit.sbatch
+} > .tmp.rewrite && cat .tmp.rewrite > submit.sbatch && rm -f .tmp.rewrite
+wait "$JP"
+[ "$(grep -c SELFTEST_MARKER run6.out)" = "1" ] && ok "任务只跑了一次（没有因偏移错位重复执行）" \
+  || bad "任务只跑一次" "跑了 $(grep -c SELFTEST_MARKER run6.out) 次"
+grep -q 'command not found' run6.out \
+  && bad "改写后没有执行到错位内容" "$(grep -m1 'command not found' run6.out)" \
+  || ok "改写后没有执行到错位内容"
+cd /tmp && rm -rf "$T"
+
+
 echo
 printf '结果：%d 通过 / %d 失败\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

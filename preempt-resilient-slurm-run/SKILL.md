@@ -1,6 +1,6 @@
 ---
 name: preempt-resilient-slurm-run
-description: Keeps a long-running job alive on a Slurm cluster that cancels or preempts jobs out from under you. Use when jobs get reaped mid-run, when a job dies and nothing re-queues so the node is lost for hours, when two copies of a run corrupt the same output directory, when --exclusive is not honored, or when a work queue gets silently consumed by copies that never actually ran. Provides a lane-lottery keepalive, a fail-closed claim mutex with an off-node liveness authority, and a work queue where killed tasks return to the queue instead of being lost.
+description: Keeps a long-running job alive on a Slurm cluster that cancels or preempts jobs out from under you. Use when jobs get reaped mid-run, when a job dies and nothing re-queues so the node is lost for hours, when two copies of a run corrupt the same output directory, when --exclusive is not honored, when a work queue gets silently consumed by copies that never actually ran, or when editing the submit script mid-run makes already-running jobs execute garbage. Provides a lane-lottery keepalive, a fail-closed claim mutex with an off-node liveness authority, and a work queue where killed tasks return to the queue instead of being lost.
 ---
 
 # 在会杀作业的集群上跑长任务
@@ -23,7 +23,7 @@ description: Keeps a long-running job alive on a Slurm cluster that cancels or p
 - 补位有指数退避，不在共享集群上空转刷屏。
 - 收工只认哨兵文件，不认「某个产物存在」。
 
-## 五条硬教训
+## 六条硬教训
 
 每一条都对应一次真实事故。前两条是静默失败——不看日志你不会知道自己中招了。
 
@@ -110,6 +110,41 @@ run_task "$t"; mv -f "$t" "$Q/done/"     # ❌
 
 被杀**不算**任务失败，不计入重试次数——那不是任务的错。
 
+### 6. 升级脚本要用 `mv`，而且脚本体要包在 `{ }` 里
+
+bash 执行脚本时**不会**把文件一次读进内存。它按字节偏移量边读边执行，
+每执行完一条顶层命令就 `lseek` 回下一条的偏移量。所以在作业运行期间
+**原地改写**这个脚本（同 inode），正在跑的作业下一次 seek 会落到错位的字节上。
+
+实测（6 KB 脚本，跑到一半在顶部插 2.5 KB）：
+
+```
+loop 1..6                              <- 循环正常跑完
+small.sh: line 104: adding: command not found   <- 半行内容被当成命令执行
+loop 1..6                              <- 整个循环又跑了一遍
+```
+
+"脚本够小 bash 会整读" 是错的，6 KB 照样中招。这条特别阴，因为长跑集群上
+**边跑边改脚本是常态** —— 你修的正是那个正在被执行的文件。
+
+两道防线，都要上：
+
+```bash
+# 1. 装新版本一律用 mv：新 inode，正在跑的作业继续读旧 inode 上的旧内容
+mv submit.sbatch.new submit.sbatch          # ✅
+cp -f submit.sbatch.new submit.sbatch       # ❌ 同 inode，原地重写
+
+# 2. 脚本体整个包进 { }：bash 必须先完整解析这条复合命令才能开始执行
+{
+  ...整个脚本...
+  exit 0
+}                                            # exit 保证永远读不到 } 之后
+```
+
+第 2 条是真正的保险 —— 它让第 1 条即使被忘了也不致命。本 skill 的
+`submit.sbatch` 已经这么包好了，改的时候别把 `{ }` 弄丢。
+
+
 ## 装配
 
 ```bash
@@ -138,7 +173,7 @@ QOS 表里 `PreemptMode=cancel` 和 `Priority`（决定退避要多凶）。
 改完脚本先跑自测，不需要 GPU、不提交任何作业：
 
 ```bash
-bash selftest.sh          # 17 条断言，覆盖上面五条教训
+bash selftest.sh          # 20 条断言，覆盖上面六条教训
 ```
 
 任务丢进 `queue/`，按文件名排序执行：
