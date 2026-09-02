@@ -98,6 +98,49 @@ grep -q 'command not found' run6.out \
 cd /tmp && rm -rf "$T"
 
 
+echo "== 7. RUNCONF 兜底：--export 没生效时要吵，不要静默秒死（SKILL.md 第 8 条）=="
+sandbox
+echo 'exit 0' > queue/a.sh
+# 不给 RUNCONF 环境变量，模拟 --export=ALL,VAR=val 在非原版实现上失效
+OUT="$(env -u RUNCONF SLURM_JOB_ID=1701 SLURM_JOB_NAME=lane bash ./submit.sbatch 2>&1)"; RC=$?
+if grep -q '^RUNCONF_FALLBACK="/PATH/TO/YOUR/runconf.sh"' ./submit.sbatch; then
+  # 未装配状态：必须报错退出，且说清楚是哪儿的问题
+  [ "$RC" -ne 0 ] && saw '读不到 RUNCONF' \
+    && ok "未装配 RUNCONF_FALLBACK 时报错退出（rc=$RC）" \
+    || bad "未装配时应报错退出" "rc=$RC out=$(printf '%s' "$OUT" | head -2)"
+  [ -f queue/a.sh ] && ok "报错退出时不消费任务" || bad "报错退出时不消费任务" "a.sh 不见了"
+else
+  ok "RUNCONF_FALLBACK 已装配（跳过未装配用例）"
+fi
+cd /tmp && rm -rf "$T"
+
+echo "== 8. 热备驻留：不退出、且三道让出闸有效（SKILL.md 第 9 条）=="
+sandbox
+sed -i 's/^CLAIM_STALE_AFTER=600.*/CLAIM_STALE_AFTER=600; HEARTBEAT_SEC=3600\nSTANDBY_HOLD=1; STANDBY_POLL_SEC=1; STANDBY_HOLD_MAX_SEC=3600/' runconf.sh
+# 造一个活着的持有者：claim 存在 + 心跳是新的
+mkdir -p .claim; echo 9999 > .claim/jobid; hostname > .claim/host; date +%s > .claim/heartbeat
+echo 'exit 0' > queue/a.sh
+job 1801 > sb.out 2>&1 &
+JP=$!
+sleep 4
+if kill -0 "$JP" 2>/dev/null; then ok "claim 被活持有者占着时不退出（转入热备）"; else
+  bad "热备应驻留" "作业 4s 内就退了：$(head -3 sb.out)"; fi
+grep -q '转入【热备】' sb.out && ok "日志写明进入热备" || bad "日志写明进入热备" "$(head -3 sb.out)"
+# 让出闸二：队列清空 -> 应在一个 poll 周期内自己退出，且【不】接管 claim
+rm -f queue/a.sh
+for _ in $(seq 1 15); do kill -0 "$JP" 2>/dev/null || break; sleep 1; done
+if kill -0 "$JP" 2>/dev/null; then
+  bad "队列清空后热备应让出节点" "15s 后还在跑"; kill -9 "$JP" 2>/dev/null
+else
+  ok "队列清空后热备让出节点"
+fi
+wait "$JP" 2>/dev/null
+[ "$(cat .claim/jobid 2>/dev/null)" = "9999" ] \
+  && ok "热备退出时没有动活持有者的 claim" \
+  || bad "热备不得动别人的 claim" "claim/jobid 现在是 $(cat .claim/jobid 2>/dev/null)"
+cd /tmp && rm -rf "$T"
+
+
 echo
 printf '结果：%d 通过 / %d 失败\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

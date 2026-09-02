@@ -62,6 +62,9 @@ SUBMIT="$HERE/submit.sbatch"
 QUEUE="$(squeue -h -u "$USER_NAME" -o '%i|%j|%T|%r|%V' 2>/dev/null)"
 lane_names=()
 for spec in "${LANES[@]}"; do lane_names+=("${spec%%|*}"); done
+# 只按 lane 名匹配、【不筛状态】是有意的：开了热备（SKILL.md 第 9 条）之后，
+# 备用路是 RUNNING 而不是 PENDING。只认 PENDING 会对同一路重复提交，
+# 撞上 QOS 的 MaxSubmitPU 被打回。
 in_queue() { printf '%s\n' "$QUEUE" | grep -q "^[0-9]*|$1|"; }
 lane_job()  { printf '%s\n' "$QUEUE" | awk -F'|' -v n="$1" '$2==n {print $1; exit}'; }
 lane_state(){ printf '%s\n' "$QUEUE" | awk -F'|' -v n="$1" '$2==n {print $3; exit}'; }
@@ -200,8 +203,14 @@ for spec in "${LANES[@]}"; do
   record_and_backoff "$lane" || continue
 
   # shellcheck disable=SC2086
-  out="$(sbatch "${SBATCH_COMMON[@]}" $extra -J "$lane" \
-          -o "$LOG_DIR/${lane}-%j.out" --export=ALL,RUNCONF="$RUNCONF" \
+  # -e 必须显式给：不是所有集群都会把 stderr 并进 -o（SKILL.md 第 8 条）。
+  # 缺省行为可能是丢到 WorkDir/<impl>-<jobid>.out，结果就是「作业秒死、-o 全空、
+  # 报错在你根本不会去看的地方」。
+  # --export=ALL,VAR=val 在部分非原版实现上不生效，RUNCONF 由 submit.sbatch 里的
+  # RUNCONF_FALLBACK 兜底；这里两条都留着（前置赋值 + --export），在原版上也对。
+  out="$(RUNCONF="$RUNCONF" sbatch "${SBATCH_COMMON[@]}" $extra -J "$lane" \
+          -o "$LOG_DIR/${lane}-%j.out" -e "$LOG_DIR/${lane}-%j.err" \
+          --export=ALL,RUNCONF="$RUNCONF" \
           "$SUBMIT" 2>&1)"
   if [ $? -eq 0 ]; then
     jid="$(printf '%s' "$out" | grep -oE '[0-9]+$')"

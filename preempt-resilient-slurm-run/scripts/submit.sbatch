@@ -18,7 +18,18 @@
 
 set -uo pipefail
 
-RUNCONF="${RUNCONF:?keepalive.sh 应通过 --export 传入 RUNCONF}"
+# ---- RUNCONF 必须自带兜底，不能只靠 --export（SKILL.md 第 8 条）--------------
+# `sbatch --export=ALL,VAR=val` 是原版 slurm 的写法，不是所有集群跑的都是原版。
+# 实测一台 "spur" 重实现完全不认这个合并写法：VAR 不进作业环境，但 sbatch 照样返回 0。
+# 症状：作业落到节点 1-2 秒死，ExitCode=1:0 而 DerivedExitCode=0:0（= 一个 step 都
+# 没产生），-o 指的 .out 是 0 字节，唯一那行报错被单独丢到 WorkDir/<impl>-<jobid>.out。
+# 【装配时把下面这一行改成你的 runconf.sh 绝对路径。】
+RUNCONF_FALLBACK="/PATH/TO/YOUR/runconf.sh"
+RUNCONF="${RUNCONF:-$RUNCONF_FALLBACK}"
+[ -r "$RUNCONF" ] || {
+  echo "!! 读不到 RUNCONF=$RUNCONF —— --export 没生效且 RUNCONF_FALLBACK 没改。见 SKILL.md 第 8 条" >&2
+  exit 1
+}
 # shellcheck disable=SC1090
 . "$RUNCONF"
 
@@ -123,27 +134,72 @@ stop_heartbeat() {
   HEARTBEAT_PID=""
 }
 
-if mkdir "$CLAIM_DIR" 2>/dev/null; then
-  stamp_claim; start_heartbeat
-  say "claim 获取成功，本作业执行实际工作"
-else
-  OWNER="$(cat "$CLAIM_DIR/jobid" 2>/dev/null || true)"
-  OWNER_HOST="$(cat "$CLAIM_DIR/host" 2>/dev/null || true)"
-  HB="$(cat "$CLAIM_HEARTBEAT" 2>/dev/null || echo 0)"
-  case "$HB" in ''|*[!0-9]*) HB=0 ;; esac
+# ---- claim 获取 + 热备驻留（SKILL.md 第 9 条）---------------------------------
+# 原版行为是「claim 被占就退出」。在节点很容易拿到的队列上（burst / preemptible），
+# 这等于挂不住路：备用路提交后几秒拿到节点、再几秒因为看见 claim 而退出，
+# squeue 里长期只剩干活的那 1 路。改成占住节点盯心跳，持有者一断就地接管 ——
+# 真正的收益是抢占发生时省掉重排队 + 重拉容器 + 服务冷启动。
+# 热备【不起容器、不碰 GPU】，只占 slurm 分配；三道让出闸见下。
+# 独占配额的 QOS 上别开这个，设 STANDBY_HOLD=0 回到原版行为。
+STANDBY_HOLD="${STANDBY_HOLD:-0}"
+STANDBY_POLL_SEC="${STANDBY_POLL_SEC:-30}"
+STANDBY_HOLD_MAX_SEC="${STANDBY_HOLD_MAX_SEC:-43200}"
 
-  if [ "$HB" -eq 0 ]; then
-    say "claim 无心跳信息（持有者 ${OWNER:-未知} @ ${OWNER_HOST:-未知}），无法判活；fail-closed，退出。"
+CLAIM_WHY=""
+acquire_claim() {   # 返回 0=拿到 claim，1=没拿到（持有者还活着，或判不出死活）
+  if mkdir "$CLAIM_DIR" 2>/dev/null; then
+    stamp_claim; start_heartbeat
+    say "claim 获取成功，本作业执行实际工作"
+    return 0
+  fi
+  local owner owner_host hb age
+  owner="$(cat "$CLAIM_DIR/jobid" 2>/dev/null || true)"
+  owner_host="$(cat "$CLAIM_DIR/host" 2>/dev/null || true)"
+  hb="$(cat "$CLAIM_HEARTBEAT" 2>/dev/null || echo 0)"
+  case "$hb" in ''|*[!0-9]*) hb=0 ;; esac
+  if [ "$hb" -eq 0 ]; then
+    # 判不出死活 -> fail-CLOSED，绝不接管。回收死人的 claim 是登录节点 keepalive 的活。
+    # 措辞是接口：selftest 第 3 条按原文 grep "fail-closed" / "仍在跳，本作业退出"。改前先看那边。
+    CLAIM_WHY="claim 无心跳信息（持有者 ${owner:-未知} @ ${owner_host:-未知}），无法判活；fail-closed"
+    return 1
+  fi
+  age=$(( $(date +%s) - hb ))
+  if [ "$age" -lt "$CLAIM_STALE_AFTER" ]; then
+    CLAIM_WHY="run 已被作业 $owner @ ${owner_host:-?} 认领，心跳 ${age}s 前仍在跳"
+    return 1
+  fi
+  say "claim 心跳已停 ${age}s（> ${CLAIM_STALE_AFTER}s），持有者 ${owner:-未知} 判定已死，本作业接管。"
+  stamp_claim; start_heartbeat
+  return 0
+}
+
+if ! acquire_claim; then
+  if [ "$STANDBY_HOLD" != "1" ]; then
+    say "$CLAIM_WHY，本作业退出。"
     say "（若持有者确已死亡，登录节点的 keepalive.sh 会在下个周期回收 claim）"
     exit 0
   fi
-  AGE=$(( $(date +%s) - HB ))
-  if [ "$AGE" -lt "$CLAIM_STALE_AFTER" ]; then
-    say "run 已被作业 $OWNER @ $OWNER_HOST 认领，心跳 ${AGE}s 前仍在跳，本作业退出。"
-    exit 0
-  fi
-  say "claim 心跳已停 ${AGE}s（> ${CLAIM_STALE_AFTER}s），持有者 ${OWNER:-未知} 判定已死，本作业接管。"
-  stamp_claim; start_heartbeat
+  say "$CLAIM_WHY —— 转入【热备】：占住本节点盯心跳，持有者一断就地接管。"
+  sb_start="$(date +%s)"; sb_last_log=0
+  while :; do
+    # 让出闸一：收工哨兵
+    if [ -f "$STOP_SENTINEL" ]; then say "热备期间看见停止哨兵，释放节点退出。"; exit 0; fi
+    # 让出闸二：队列清空 —— 少了这条，活全跑完后热备还会攥着机器直到 walltime
+    if [ -z "$(find "$Q" -maxdepth 1 -type f 2>/dev/null | head -1)" ] \
+       && [ -z "$(find "$Q/.inflight" -maxdepth 1 -type f 2>/dev/null | head -1)" ]; then
+      say "热备期间队列已清空，没活可干，释放节点退出。"; exit 0
+    fi
+    # 让出闸三：占用封顶
+    sb_age=$(( $(date +%s) - sb_start ))
+    if [ "$sb_age" -ge "$STANDBY_HOLD_MAX_SEC" ]; then
+      say "热备已占 ${sb_age}s，到 STANDBY_HOLD_MAX_SEC 上限，释放节点退出。"; exit 0
+    fi
+    if [ $(( sb_age - sb_last_log )) -ge 600 ]; then
+      say "[热备 ${sb_age}s] $CLAIM_WHY"; sb_last_log="$sb_age"
+    fi
+    sleep "$STANDBY_POLL_SEC"
+    acquire_claim && break
+  done
 fi
 
 # 释放 claim —— 【只在它仍属于本作业时】才删。

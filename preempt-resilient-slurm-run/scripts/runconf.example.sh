@@ -35,7 +35,11 @@ TASK_MAX_ATTEMPTS=3
 # ---- lane：往队列里挂几张彩票 -------------------------------------------------
 # 格式：<lane名>|<sbatch 额外参数>
 # 同一个 run 跨多个 QOS/account 挂多路。哪路先拿到节点，claim 锁保证只有它干活，
-# 其余到手即退，成本接近零。MaxSubmitPU 允许几张就买几张。
+# 其余到手即退（或转热备），成本接近零。MaxSubmitPU 允许几张就买几张。
+#
+# 别按 priority 分配 lane —— 按【实测落地时间】分配（SKILL.md 第 10 条）。
+# 被 GrpTRES 占满的高优先级 QOS，pending 原因是 QOSGrpNodeLimit，挂多少路都不会开始；
+# 把 lane 全押在真能落到节点的那个 QOS 上，哪怕它 priority 低、会被抢占。
 LANES=(
   "myrun-hi|-A my-account   --qos=my-high-qos"
   "myrun-lo|-A my-account   --qos=my-burst-qos -t 720"
@@ -45,6 +49,16 @@ MAX_QUEUED=8                # 队列里本 run 的作业总数上限
 
 # sbatch 公共参数（节点数、卡数、时限等）
 SBATCH_COMMON=(-N 1 --exclusive --gpus-per-node=8)
+
+# ---- 热备驻留（SKILL.md 第 9 条）----------------------------------------------
+# 0 = 原版行为：备用路发现 claim 被占就退出。
+# 1 = 备用路占住节点盯心跳，持有者一断就地接管。
+# 在节点很容易拿到的队列（burst / preemptible / 低优先级 QOS）上必须开 1，
+# 否则备用路落到节点几秒后就自己退了，squeue 里长期只剩干活的那 1 路。
+# 在独占配额的 QOS 上别开：满编时会占 N 台整机，其中 N-1 台空转。
+STANDBY_HOLD=0
+STANDBY_POLL_SEC=30          # 热备多久看一次 claim 心跳
+STANDBY_HOLD_MAX_SEC=43200   # 单个热备最多占多久（秒），到点自己让出节点
 
 # ---- 节点体检：作业拿到节点后先自检，不合格就把任务放回队列并退出 --------------
 # 见 SKILL.md「--exclusive 不一定兑现」。设成 0 关闭。

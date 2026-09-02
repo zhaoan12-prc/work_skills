@@ -1,6 +1,6 @@
 ---
 name: preempt-resilient-slurm-run
-description: Keeps a long-running job alive on a Slurm cluster that cancels or preempts jobs out from under you. Use when jobs get reaped mid-run, when a job dies and nothing re-queues so the node is lost for hours, when two copies of a run corrupt the same output directory, when --exclusive is not honored, when a work queue gets silently consumed by copies that never actually ran, or when editing the submit script mid-run makes already-running jobs execute garbage. Provides a lane-lottery keepalive, a fail-closed claim mutex with an off-node liveness authority, and a work queue where killed tasks return to the queue instead of being lost.
+description: Keeps a long-running job alive on a Slurm cluster that cancels or preempts jobs out from under you. Use when jobs get reaped mid-run, when a job dies and nothing re-queues so the node is lost for hours, when two copies of a run corrupt the same output directory, when --exclusive is not honored, when a work queue gets silently consumed by copies that never actually ran, when editing the submit script mid-run makes already-running jobs execute garbage, when jobs die one second after landing with an empty stdout file, or when standby lanes vanish from the queue as fast as you submit them. Provides a lane-lottery keepalive, a fail-closed claim mutex with an off-node liveness authority, and a work queue where killed tasks return to the queue instead of being lost.
 ---
 
 # 在会杀作业的集群上跑长任务
@@ -23,9 +23,9 @@ description: Keeps a long-running job alive on a Slurm cluster that cancels or p
 - 补位有指数退避，不在共享集群上空转刷屏。
 - 收工只认哨兵文件，不认「某个产物存在」。
 
-## 七条硬教训
+## 十条硬教训
 
-每一条都对应一次真实事故。前两条是静默失败——不看日志你不会知道自己中招了。
+每一条都对应一次真实事故。第 1、2、8 条是静默失败——不看日志你不会知道自己中招了。
 
 ### 1. 补位逻辑必须在作业【外面】
 
@@ -270,6 +270,115 @@ fi
 推论：**每个阶段的产物都同时落一份 `<name>.<jobid>` 边车副本**。
 split-brain 真发生时，后来者会覆盖同名文件，边车副本是唯一能把前一任成果捞回来的东西。
 实测就是靠这个把一份跑了 76 分钟的中间产物救了回来。
+
+### 8. 别用 `--export` 传关键变量，也别指望 stderr 会并进 `-o`
+
+`sbatch --export=ALL,VAR=val` 是原版 slurm 的写法。**不是所有集群跑的都是原版
+slurm。** 实测一台跑 "spur" 重实现的集群完全不认这个合并写法：`VAR` 根本不进作业
+环境，但 `sbatch` 照样返回 0、照样给你一个 jobid。
+
+后果长这样，非常难认：
+
+```
+JobState=FAILED  Reason=NonZeroExitCode
+ExitCode=1:0     DerivedExitCode=0:0
+```
+
+`-o` 指的那个 `.out` 是 **0 字节**。作业拿到节点后 1-2 秒就死，keepalive 立刻补位，
+补上去又死 —— 队列看起来一直在动，其实一个任务都没跑。
+
+两个诊断要点：
+
+- **`DerivedExitCode=0:0` 而 `ExitCode` 非零 = 一个 step 都没产生**，
+  也就是批处理脚本根本没被启动成功，不是你的脚本内部崩了。别去查脚本逻辑。
+- **`.out` 是 0 字节不代表没有报错。** 那台集群**不把 stderr 并进 `-o`**：
+  没给 `-e` 时它单独写到 `WorkDir/spur-<jobid>.out`。唯一那行报错
+  （`spur_job.sh: line 21: RUNCONF: ...`）在共享盘根目录躺了半小时没人看见。
+
+所以两条都要做：
+
+```bash
+# a) sbatch 一律显式给 -e，别赌它会合并
+sbatch ... -o "$LOG_DIR/${lane}-%j.out" -e "$LOG_DIR/${lane}-%j.err" ...
+
+# b) submit.sbatch 里给关键变量写死绝对路径兜底，不依赖任何 --export 语义
+RUNCONF_FALLBACK="/abs/path/to/your/runconf.sh"   # 装配时改这一行
+RUNCONF="${RUNCONF:-$RUNCONF_FALLBACK}"
+[ -r "$RUNCONF" ] || { echo "!! 读不到 RUNCONF=$RUNCONF" >&2; exit 1; }
+```
+
+顺带一个同源的坑：**这类实现会在 `sbatch` 那一刻就把脚本快照进自己的库**
+（`scontrol show job` 的 `Command=` 显示的是脚本内容而不是路径，节点上跑的是
+`/var/spool/<impl>/job<N>/<impl>_job.sh`）。**改磁盘上的 `submit.sbatch` 对已经排队的
+作业无效。** 要么按第 6 条把 `submit.sbatch` 做薄、只留一行调运行时才读的
+`job_body.sh`，要么认了、把旧作业重提一遍。
+
+### 9. 备用路拿到节点后不要退出 —— 要热备驻留
+
+原版行为是：备用路落到节点，发现 claim 被人占着，就干净退出（第 3 条的 fail-closed）。
+在**节点很容易拿到**的队列上（比如低优先级的 burst/preemptible QOS），这等于挂不住路：
+备用路提交后几秒就拿到节点、再几秒就因为看见 claim 而退出，`squeue` 里长期只剩
+正在干活的那 1 路。你以为挂了 4 路，实际只有 1 路。
+
+改成备用路**占住节点不退**，盯着 claim 心跳当热备：
+
+```bash
+if ! acquire_claim; then
+  [ "$STANDBY_HOLD" = "1" ] || { say "$CLAIM_WHY —— 退出。"; exit 0; }
+  say "$CLAIM_WHY —— 转入热备：占住本节点盯心跳，持有者一断就地接管。"
+  sb_start="$(date +%s)"
+  while :; do
+    [ -f "$STOP_SENTINEL" ] && exit 0                      # 闸一：收工哨兵
+    queue_empty && exit 0                                  # 闸二：没活可干就让出节点
+    [ $(( $(date +%s) - sb_start )) -ge "$STANDBY_HOLD_MAX_SEC" ] && exit 0   # 闸三：占用封顶
+    sleep "$STANDBY_POLL_SEC"
+    acquire_claim && break
+  done
+fi
+```
+
+真正的收益不是「看起来是 4 路」，是**持有者被抢占的那一刻热备原地接管**：
+省掉重新排队 + 重新拉容器 + 服务冷启动。在 `PreemptMode=cancel`、典型存活
+20-30 分钟的集群上，这经常就是「跑得完」和「永远跑不完」的差别。
+
+三件事必须同时做对：
+
+- **热备绝不接管活着的持有者**，判据仍然是第 3、7 条那套（心跳读不到就 fail-CLOSED，
+  只有心跳停超过 `CLAIM_STALE_AFTER` 才接管）。热备只是把「退出」换成「继续等」。
+- **热备期间不起容器、不碰 GPU**，只占 slurm 分配。否则第二个副本会去动持有者的服务。
+- **必须有让出闸**。上面三道：收工哨兵 / 队列清空 / `STANDBY_HOLD_MAX_SEC` 封顶。
+  少了第二道，任务全跑完之后热备还会攥着机器直到 walltime。
+
+代价要跟人讲清楚：满编时会占 N 台整机，其中 N-1 台空转。在
+preemptible/burst 这类「边角产能、随时被高优先级抢走」的 QOS 上这是可接受的；
+在独占配额的 QOS 上就别开，设 `STANDBY_HOLD=0` 回到原版行为。
+
+还有一个连带项：**keepalive 判断「这一路挂上了没有」必须把 `RUNNING` 也算进去**，
+不能只认 `PENDING`。热备路是 RUNNING 状态，只认 PENDING 会导致对同一路重复提交，
+撞上 QOS 的 `MaxSubmitPU` 被打回。
+
+### 10. 挑队列看的是「多久能落到节点」，不是 priority
+
+直觉是把优先级最高的 QOS 排满，剩下的余量再挂低优先级。这个直觉在有
+`GrpTRES` 配额的 QOS 上是错的：priority 决定的是**同一个资源池里谁先拿**，
+`GrpTRES` 决定的是**这个池子一共有多大**。池子被自己组的长作业占满时，
+priority 再高也只是排在一条不动的队伍最前面。
+
+实测的一组对照（同一天、同一个集群）：
+
+| QOS | Priority | 限额 | 实际表现 |
+|---|---|---|---|
+| 高优先级 QOS | 10000 | `GrpTRES=node=8`，长期被同组 24h 作业占满 | pending 原因全是 `QOSGrpNodeLimit`，等待以小时计 |
+| burst QOS | 100 | `MaxSubmitPU=4`，无节点配额 | 提交后几秒落到节点 |
+
+诊断只要两条命令：`squeue` 的 `%r`（NODELIST(REASON)）列看 pending 原因，
+`sacctmgr show qos <name> format=Name,Priority,GrpTRES,MaxSubmitPU` 看限额。
+pending 原因是 `QOSGrpNodeLimit` / `QOSGrpCpuLimit` 这类**配额类**原因时，
+这一路就不是「在排队」，是「在等一个不会腾出来的池子」——挂着只会让
+`squeue` 好看，不会让活早开始。原因是 `Priority` / `Resources` 才是真在排队。
+
+所以：**先量各 QOS 的落地时间，把 lane 全押在落得下去的那个上**，
+哪怕它 priority 低、会被抢占。抢占有第 9 条的热备兜底，等不到节点没有任何兜底。
 
 ## 已知毛刺
 
