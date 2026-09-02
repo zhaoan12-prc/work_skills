@@ -29,6 +29,15 @@ LOG="$RUN_DIR/keepalive.log"
 LOCK="$RUN_DIR/.keepalive.lock"
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
+# 互斥：scrontab 和 keepalive_daemon.sh 很容易同时挂着（一个是调度器托管的，
+# 一个是登录节点的退路），两边每 3 分钟撞一次就会重复提交、并发回收 claim。
+# $LOCK 这个变量以前声明了却没人用 —— 现在真的用上。拿不到锁就安静让路。
+exec 9>"$LOCK" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+  echo "[$(date -u +%FT%TZ)] 另一个 keepalive 正在跑，本次让路" >> "$LOG"
+  exit 0
+fi
+
 export PATH="${HOME}/bin:${HOME}/.local/bin:/usr/local/bin:${PATH}"
 
 # whoami 会 fork 并可能触盘；共享盘写回停滞时它会卡死在 D 态拖垮整个 keepalive。
