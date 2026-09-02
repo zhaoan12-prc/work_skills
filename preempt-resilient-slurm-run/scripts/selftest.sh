@@ -141,6 +141,43 @@ wait "$JP" 2>/dev/null
 cd /tmp && rm -rf "$T"
 
 
+echo "== 9. 幽灵 claim：keepalive 不得把 claim 补到热备头上，也不得给补出来的 claim 续命 =="
+# 2026-09-02 实测事故：热备也是 RUNNING，keepalive 凭 RUNNING 把 claim 补给了一路热备，
+# 又每周期代刷心跳，于是所有路都看到「心跳新鲜」永远退让 —— 队列卡死 22 分钟。
+sandbox
+sed -i 's/^CLAIM_STALE_AFTER=600.*/CLAIM_STALE_AFTER=600; HEARTBEAT_SEC=3600\nSTANDBY_HOLD=1; STANDBY_POLL_SEC=1; STANDBY_HOLD_MAX_SEC=5/' runconf.sh
+
+# 9a) worker 标记只有真 worker 会写
+echo 'exit 0' > queue/a.sh
+OUT="$(job 1901)"
+[ -f .worker/1901 ] && bad "worker 退出后应清掉自己的标记" "$(ls .worker)" \
+  || ok "worker 跑完清掉了自己的 worker 标记"
+saw 'claim 获取成功' && ok "无 claim 时正常成为 worker" || bad "无 claim 时应成为 worker" "$OUT"
+
+# 9b) 热备【不】写 worker 标记
+mkdir -p .claim; echo 9999 > .claim/jobid; hostname > .claim/host; date +%s > .claim/heartbeat
+echo 'exit 0' > queue/b.sh
+job 1902 > sb9.out 2>&1 & JP=$!
+sleep 3
+[ -f .worker/1902 ] \
+  && { bad "热备不得写 worker 标记" "存在 .worker/1902"; kill -9 "$JP" 2>/dev/null; } \
+  || ok "热备不写 worker 标记（keepalive 因此不会误补 claim 给它）"
+kill -9 "$JP" 2>/dev/null; wait "$JP" 2>/dev/null
+
+# 9c) 心跳过期的 claim 必须能被接管 —— 哪怕它带着 keepalive 的 note
+rm -rf .claim; mkdir -p .claim
+echo 9999 > .claim/jobid; hostname > .claim/host
+echo $(( $(date +%s) - 700 )) > .claim/heartbeat        # 700s > CLAIM_STALE_AFTER=600
+echo "restored by keepalive: claim missing while 9999 RUNNING" > .claim/note
+echo 'exit 0' > queue/c.sh
+OUT="$(job 1903)"
+saw '判定已死，本作业接管' \
+  && ok "带 note 的过期 claim 可被接管（幽灵 claim 会自愈）" \
+  || bad "带 note 的过期 claim 应可接管" "$(printf '%s' "$OUT" | head -3)"
+[ -f queue/done/c.sh ] && ok "接管后继续消费队列" || bad "接管后应消费队列" "c.sh 没进 done"
+cd /tmp && rm -rf "$T"
+
+
 echo
 printf '结果：%d 通过 / %d 失败\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

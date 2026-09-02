@@ -23,6 +23,7 @@ RUNCONF="${RUNCONF:-$HERE/runconf.sh}"
 . "$RUNCONF"
 
 CLAIM_DIR="$RUN_DIR/.claim"
+WORKER_DIR="$RUN_DIR/.worker"   # 只有真正拿到 claim 的作业会在里面留 <jobid>
 STATE_DIR="$RUN_DIR/.keepalive_state"
 LOG="$RUN_DIR/keepalive.log"
 LOCK="$RUN_DIR/.keepalive.lock"
@@ -90,7 +91,15 @@ if [ -f "$CLAIM_DIR/jobid" ]; then
     RUNNING*|COMPLETING*)
       WORKING="$OWNER"
       # 代其刷心跳：这样即使持有者跑的是不写心跳的旧版作业脚本，也会被正确尊重。
-      date +%s > "$CLAIM_DIR/heartbeat" 2>/dev/null || true
+      #
+      # 但【绝不给自己补出来的 claim 续命】。补错了（补到热备头上）时，续命会让
+      # 这个幽灵 claim 永远「心跳新鲜」，于是每一路都退让、没人接管、队列永久卡死。
+      # 不续命的话，补错的 claim 会在 CLAIM_STALE_AFTER 之后自动腐烂，被正常接管流程回收。
+      if [ -f "$CLAIM_DIR/note" ]; then
+        log "claim $OWNER 是 keepalive 补出来的，不代刷心跳（让它能自然过期）"
+      else
+        date +%s > "$CLAIM_DIR/heartbeat" 2>/dev/null || true
+      fi
       ;;
     *)
       log "⚠ claim 持有者 ${OWNER:-未知} 状态 '${OWNER_STATE:-已不在队列}' —— 回收陈旧 claim"
@@ -106,6 +115,9 @@ if [ -z "$WORKING" ]; then
     st="$(lane_state "$n")"
     case "$st" in RUNNING*|COMPLETING*)
       j="$(lane_job "$n")"
+      # RUNNING 不等于在干活 —— 开了 STANDBY_HOLD 之后，RUNNING 的绝大多数是热备。
+      # 只认作业自己留下的 worker 标记；没有标记就不补，宁可不补也不能补出幽灵 claim。
+      [ -f "$WORKER_DIR/$j" ] || continue
       mkdir -p "$CLAIM_DIR"
       echo "$j"  > "$CLAIM_DIR/jobid"
       echo "$n"  > "$CLAIM_DIR/lane"

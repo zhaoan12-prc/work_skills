@@ -36,8 +36,13 @@ RUNCONF="${RUNCONF:-$RUNCONF_FALLBACK}"
 JOB="${SLURM_JOB_ID:-unknown}"
 CLAIM_DIR="$RUN_DIR/.claim"
 CLAIM_HEARTBEAT="$CLAIM_DIR/heartbeat"
+# worker 自证标记。登录节点的 keepalive 看不出一个 RUNNING 的 lane 作业到底是
+# 「在干活」还是「在热备」——两者都是 RUNNING。它据此补 claim 会补到热备头上，
+# 造成幽灵 claim（谁都不接管、队列永久卡死）。所以真正拿到 claim 的作业在这里
+# 留一个只有自己会写的标记，keepalive 只认这个标记，不认 RUNNING。
+WORKER_DIR="$RUN_DIR/.worker"
 Q="$RUN_DIR/queue"
-mkdir -p "$Q/done" "$Q/failed" "$Q/.inflight" "$Q/.attempts" "$LOG_DIR"
+mkdir -p "$Q/done" "$Q/failed" "$Q/.inflight" "$Q/.attempts" "$LOG_DIR" "$WORKER_DIR"
 
 say() { echo ">>> $*"; }
 say "$(hostname)  $(date -u)  JOB=$JOB  LANE=${SLURM_JOB_NAME:-?}"
@@ -113,6 +118,7 @@ say "节点体检通过"
 # 解锁（回收死人留下的 claim）由登录节点的 keepalive.sh 负责。
 HEARTBEAT_PID=""
 stamp_claim() {
+  : > "$WORKER_DIR/$JOB"         # 自证：本作业是 worker，不是热备
   echo "$JOB"                    > "$CLAIM_DIR/jobid"
   hostname                       > "$CLAIM_DIR/host"
   echo "${SLURM_JOB_NAME:-?}"    > "$CLAIM_DIR/lane"
@@ -207,6 +213,7 @@ fi
 # 于是下一路又能 mkdir 成功，与正在干活的作业并发。
 cleanup() {
   stop_heartbeat
+  rm -f "$WORKER_DIR/$JOB"
   # 被 SIGKILL 时这里根本不会执行 —— 所以 .inflight 回收必须在【下次启动时】做，
   # 不能指望退出路径。见下面 sweep_inflight。
   if [ "$(cat "$CLAIM_DIR/jobid" 2>/dev/null || true)" = "$JOB" ]; then
