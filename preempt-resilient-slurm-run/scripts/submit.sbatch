@@ -118,6 +118,9 @@ say "节点体检通过"
 # 解锁（回收死人留下的 claim）由登录节点的 keepalive.sh 负责。
 HEARTBEAT_PID=""
 stamp_claim() {
+  # 接管别人的 claim 时目录是旧的，keepalive 补 claim 时留下的 note 会残留。
+  # 不清掉的话 keepalive 会一直以为这个 claim 是它补的、拒绝代刷心跳。
+  rm -f "$CLAIM_DIR/note"
   : > "$WORKER_DIR/$JOB"         # 自证：本作业是 worker，不是热备
   echo "$JOB"                    > "$CLAIM_DIR/jobid"
   hostname                       > "$CLAIM_DIR/host"
