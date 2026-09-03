@@ -1,13 +1,13 @@
 ---
 name: claude-amd-direct-setup
-description: Installs, repairs, and verifies Claude Code against the direct AMD LLM Gateway. Use for AMD Gateway authentication, missing subscription-key errors, apiKeyHelper failures, wrong Claude entrypoints, upgrades that bypass wrappers, stale Claude binaries, or claude-route and claude -p diagnostics.
+description: Installs, configures, repairs, and verifies Claude Code against the direct AMD LLM Gateway. Use for AMD Gateway authentication, missing subscription-key errors, apiKeyHelper failures, wrong Claude entrypoints, upgrades that bypass wrappers, stale Claude binaries, broken bashrc login shells, missing user header errors, or claude -p diagnostics.
 ---
 
 # Claude AMD Direct Setup
 
 Configure Claude Code so `claude` always reaches the AMD Anthropic-compatible
-gateway with the subscription-key header. Keep secrets outside repositories and
-prove success with a real request.
+gateway with the subscription-key and user headers. Keep secrets outside
+repositories and prove success with a real request.
 
 ## Required end state
 
@@ -19,7 +19,8 @@ prove success with a real request.
 
 ```bash
 export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"
-export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${AMD_LLM_GATEWAY_KEY}"
+export ANTHROPIC_CUSTOM_HEADERS=$'Ocp-Apim-Subscription-Key: '"${AMD_LLM_GATEWAY_KEY}"$'\nuser: '"$(id -un)"
+export AMD_LLM_GATEWAY_KEY
 ```
 
 - `~/.claude/settings.json` contains only `apiKeyHelper` and a supported model.
@@ -43,29 +44,60 @@ model.
 
 ## Safety rules
 
-1. Ask for `AMD_LLM_GATEWAY_KEY` before writing secret-bearing files.
-2. Never print the key or put it in commands that may enter shell history.
-3. Store it only in `~/.claude/amd-gateway.env`, mode `600`.
-4. Never put a real key in a repository, `SKILL.md`, logs, or test output.
-5. Do not use `apiKeyHelper` as the gateway authentication mechanism. AMD
-   requires `Ocp-Apim-Subscription-Key` through `ANTHROPIC_CUSTOM_HEADERS`.
-6. Do not claim success from configuration inspection or `claude-route`; run
-   a real `claude -p` request.
-7. Do not overwrite an official binary until its version and replacement have
+1. Never put a real API key in this skill, a repository, chat logs, or test
+   output.
+2. When the user explicitly authorizes automated setup, prefer
+   `AMD_LLM_GATEWAY_KEY` or stdin over interactive prompts. Do not echo the key.
+3. Store the key only in `~/.claude/amd-gateway.env`, mode `600`.
+4. Do not use `apiKeyHelper` as the gateway authentication mechanism. AMD
+   requires `Ocp-Apim-Subscription-Key` and `user` through
+   `ANTHROPIC_CUSTOM_HEADERS`.
+5. Do not claim success from configuration inspection alone; run a real
+   `claude -p` request.
+6. Do not overwrite an official binary until its version and replacement have
    been identified.
+7. Restart existing Claude sessions after changing the wrapper or config.
 
-## Workflow
+## Preferred workflow
 
-### 1. Inspect without leaking credentials
+### 1. Run the installer
 
-Run:
+From the repository root:
+
+```bash
+bash work_skills/claude-amd-direct-setup/scripts/install.sh
+```
+
+Optional model:
+
+```bash
+bash work_skills/claude-amd-direct-setup/scripts/install.sh claude-opus-4.6
+```
+
+The installer resolves the AMD key in this order:
+
+1. `AMD_LLM_GATEWAY_KEY` environment variable
+2. Existing `~/.claude/amd-gateway.env`
+3. Stdin when the script is not attached to a TTY
+4. Secure interactive prompt
+
+Automated examples when the user explicitly provides the key:
+
+```bash
+AMD_LLM_GATEWAY_KEY='<secret>' bash work_skills/claude-amd-direct-setup/scripts/install.sh
+printf '%s\n' '<secret>' | bash work_skills/claude-amd-direct-setup/scripts/install.sh
+```
+
+The script writes the env file, settings, wrapper, PATH, installs the official
+binary if missing, runs healthcheck, and performs a real request.
+
+### 2. Inspect without leaking credentials
 
 ```bash
 command -v claude
 readlink -f "$(command -v claude)"
 claude --version
-test -x "$HOME/.local/bin/claude" && "$HOME/.local/bin/claude" --version
-test -f "$HOME/.claude/amd-gateway.env" && echo env_file_exists
+test -f "$HOME/.claude/amd-gateway.env" && stat -c '%a %n' "$HOME/.claude/amd-gateway.env"
 bash work_skills/claude-amd-direct-setup/scripts/healthcheck.sh
 ```
 
@@ -73,32 +105,21 @@ Interpret entrypoints carefully:
 
 - Healthy: `command -v claude` is `~/bin/claude`.
 - Bypassed wrapper: it resolves to `~/.local/bin/claude`.
-- Legacy layout: it resolves to `/usr/local/bin/claude`, often forwarding to a
-  stale `/usr/local/bin/claude.real`.
+- Legacy layout: it resolves to `/usr/local/bin/claude`.
 
-Check running sessions separately. Configuration is not hot-reloaded; old
-Claude processes must be restarted.
+Configuration is not hot-reloaded; old Claude processes must be restarted.
 
-### 2. Install or update the official binary first
+### 3. Verify independently
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash
+claude -p --output-format json 'Reply with exactly: API OK'
+claude -p --output-format json 'Reply with exactly: API OK' |
+  python3 work_skills/claude-amd-direct-setup/scripts/verify_output_model.py
 ```
 
-After installation, verify the official binary directly:
+## Manual config reference
 
-```bash
-"$HOME/.local/bin/claude" --version
-```
-
-If installation downloads a binary and hangs, preserve the executable before
-stopping the installer. Do not replace a known-working binary with an
-unverified download.
-
-### 3. Write the secret file
-
-Avoid passing the key as a command-line argument. Write it from a protected
-interactive input or an already populated environment variable:
+### Secret file
 
 ```bash
 mkdir -p "$HOME/.claude"
@@ -108,130 +129,51 @@ printf 'export AMD_LLM_GATEWAY_KEY="%s"\n' "$AMD_LLM_GATEWAY_KEY" \
 chmod 600 "$HOME/.claude/amd-gateway.env"
 ```
 
-The file must contain one export and no extra output.
+### Settings
 
-### 4. Write minimal settings
+Use `bash -c`, not `bash -lc`. Login shells source `~/.bashrc`; a broken
+`.bashrc` makes `apiKeyHelper` return empty and breaks interactive Claude.
 
 ```json
 {
-  "apiKeyHelper": "bash -lc 'printf %s \"$AMD_LLM_GATEWAY_KEY\"'",
+  "apiKeyHelper": "bash -c 'set -a; [ -f \"$HOME/.claude/amd-gateway.env\" ] && . \"$HOME/.claude/amd-gateway.env\"; set +a; printf %s \"$AMD_LLM_GATEWAY_KEY\"'",
   "model": "claude-sonnet-4.6"
 }
 ```
 
-`apiKeyHelper` satisfies Claude Code's external-key mode. The actual AMD
-gateway authentication still comes from `ANTHROPIC_CUSTOM_HEADERS`.
+### Wrapper
 
-Do not add `/Unified` settings from the legacy guide. This direct-mode skill
-uses `https://llm-api.amd.com/Anthropic`.
+The AMD Anthropic gateway requires both headers:
 
-### 5. Create the stable wrapper
+- `Ocp-Apim-Subscription-Key`
+- `user: <os-username>`
 
-Create `~/bin/claude` with this behavior:
+Use newline-separated `ANTHROPIC_CUSTOM_HEADERS` and export
+`AMD_LLM_GATEWAY_KEY` before launching the official binary. See
+`scripts/install.sh` for the canonical wrapper.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-env_file="${HOME}/.claude/amd-gateway.env"
-real_claude="${HOME}/.local/bin/claude"
-
-if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" && -f "$env_file" ]]; then
-  set +u
-  source "$env_file"
-  set -u
-fi
-
-if [[ -z "${AMD_LLM_GATEWAY_KEY:-}" ]]; then
-  echo "AMD gateway key is missing: $env_file" >&2
-  exit 1
-fi
-if [[ ! -x "$real_claude" ]]; then
-  echo "Official Claude binary is missing: $real_claude" >&2
-  exit 1
-fi
-
-export CLAUDE_AMD_WRAPPER=1
-export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"
-export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${AMD_LLM_GATEWAY_KEY}"
-export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
-
-exec "$real_claude" "$@"
-```
-
-Make it executable:
-
-```bash
-chmod 700 "$HOME/bin/claude"
-```
-
-Never make `~/.local/bin/claude` point back to this wrapper; that creates an
-updater conflict and can create recursion.
-
-### 6. Fix PATH ordering
-
-Ensure `~/bin` comes before `~/.local/bin`:
+### PATH
 
 ```bash
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 ```
 
-Persist the equivalent once in the appropriate shell startup file. Remove
-duplicate or reversed PATH fragments. Then clear command lookup caching:
-
-```bash
-hash -r
-command -v claude
-```
-
-### 7. Verify in order
-
-First run the non-secret healthcheck:
-
-```bash
-bash work_skills/claude-amd-direct-setup/scripts/healthcheck.sh
-```
-
-Then run a real request:
-
-```bash
-claude -p --output-format json 'Reply with exactly: API OK'
-```
-
-Verify the response model:
-
-```bash
-claude -p --output-format json 'Reply with exactly: API OK' |
-  python3 work_skills/claude-amd-direct-setup/scripts/verify_output_model.py
-```
-
-Finally verify tool use when required:
-
-```bash
-claude -p --output-format json --allowedTools Bash -- \
-  'Use Bash to run pwd, then answer with only the absolute path.'
-```
-
-Restart any Claude process that was already running before the repair.
+Validate shell startup files with `bash -n ~/.bashrc` after edits.
 
 ## Failure diagnosis
 
-- `apiKeyHelper script is failing`: the wrapper was bypassed, the env file is
-  missing, or the process predates the repair.
-- `Invalid API key`: the AMD key was sent to the official Anthropic endpoint;
-  check `command -v claude`, wrapper execution, and `ANTHROPIC_BASE_URL`.
-- `401 missing subscription key`: `ANTHROPIC_CUSTOM_HEADERS` is absent or not
-  the single string `Ocp-Apim-Subscription-Key: ...`.
-- Route inspection looks healthy but requests fail: route inspection is not
-  proof; inspect the real `claude -p` error.
-- Claude version becomes older after repair: a legacy wrapper is invoking
-  `/usr/local/bin/claude.real`; migrate to the user-local layout above.
-- A Claude update breaks routing: confirm the updater changed
-  `~/.local/bin/claude`, keep that binary intact, and restore PATH precedence
-  for `~/bin`.
-- Retired-model warning: normalize `~/.claude/settings.json`, then restart.
-- Experimental beta-header error: ensure
-  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is exported by the wrapper.
+- `apiKeyHelper failed: did not return a value`: env file missing, wrapper not
+  used, old session still running, or `apiKeyHelper` uses fragile `bash -lc`
+  against a broken `~/.bashrc`.
+- `400 The 'user' header with a valid User`: wrapper missing the `user` header.
+- `Invalid API key`: request went to official Anthropic instead of AMD; check
+  wrapper, `ANTHROPIC_BASE_URL`, and PATH order.
+- `401 missing subscription key`: `ANTHROPIC_CUSTOM_HEADERS` missing or wrong.
+- `/model` removed `model` from settings or added extra fields: rerun installer
+  or restore supported model in `settings.json`, then restart.
+- Retired-model warning: normalize settings to a supported model, then restart.
+- Healthcheck shows `fragile_helper`: replace `bash -lc` apiKeyHelper with the
+  env-file reader from this skill.
 
 ## Completion checklist
 
@@ -239,9 +181,10 @@ Restart any Claude process that was already running before the repair.
 - [ ] `~/.claude/amd-gateway.env` exists with mode `600`.
 - [ ] `~/.local/bin/claude` is the current official binary.
 - [ ] `~/bin/claude` is the wrapper and is mode `700`.
+- [ ] Wrapper exports AMD base URL, subscription key, and user header.
 - [ ] `~/bin` precedes `~/.local/bin`.
-- [ ] The wrapper exports the AMD base URL and subscription header.
 - [ ] Settings contain only `apiKeyHelper` and a supported model.
+- [ ] `bash -n ~/.bashrc` passes.
 - [ ] Healthcheck passes.
 - [ ] A real text request succeeds.
 - [ ] Response model verification succeeds.

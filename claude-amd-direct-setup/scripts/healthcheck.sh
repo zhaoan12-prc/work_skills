@@ -53,6 +53,10 @@ else:
         print("unsupported_model")
     elif not isinstance(helper, str) or "AMD_LLM_GATEWAY_KEY" not in helper:
         print("bad_helper")
+    elif "bash -lc" in helper:
+        print("fragile_helper")
+    elif "amd-gateway.env" not in helper:
+        print("bad_helper")
     else:
         print("ok")
 PY
@@ -60,8 +64,12 @@ PY
 
 wrapper_exists=false
 official_exists=false
+wrapper_user_header="missing"
 [[ -x "$wrapper" ]] && wrapper_exists=true
 [[ -x "$official" ]] && official_exists=true
+if [[ -f "$wrapper" ]] && grep -q 'ANTHROPIC_CUSTOM_HEADERS' "$wrapper" && grep -q 'id -un' "$wrapper"; then
+  wrapper_user_header="ok"
+fi
 
 official_target="missing"
 official_layout="missing"
@@ -84,13 +92,14 @@ if [[ "$resolved" != "$wrapper" ||
       "$official_layout" != managed ||
       "$path_order" != ok ||
       "$env_mode" != 600 ||
-      "$settings_state" != ok ]]; then
+      "$settings_state" != ok ||
+      "$wrapper_user_header" != ok ]]; then
   status=repair_required
 fi
 
 python3 - "$status" "$resolved" "$wrapper" "$wrapper_exists" \
   "$official" "$official_exists" "$official_target" "$official_layout" \
-  "$path_order" "$env_mode" "$settings_state" <<'PY'
+  "$path_order" "$env_mode" "$settings_state" "$wrapper_user_header" <<'PY'
 import json
 import sys
 
@@ -106,6 +115,7 @@ print(json.dumps({
     "path_order": sys.argv[9],
     "secret_file_mode": sys.argv[10],
     "settings": sys.argv[11],
+    "wrapper_user_header": sys.argv[12],
 }, indent=2))
 PY
 

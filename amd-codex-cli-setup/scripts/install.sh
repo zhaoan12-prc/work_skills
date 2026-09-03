@@ -7,19 +7,50 @@ codex_prefix="${HOME}/.local"
 codex_bin="${codex_prefix}/bin/codex"
 config_dir="${HOME}/.codex"
 config_file="${config_dir}/config.toml"
+claude_env_file="${HOME}/.claude/amd-gateway.env"
+path_line='export PATH="$HOME/bin:$HOME/.local/bin:$PATH"'
+
+resolve_amd_key() {
+  if [[ -n "${AMD_LLM_GATEWAY_KEY:-}" ]]; then
+    printf '%s' "$AMD_LLM_GATEWAY_KEY"
+    return
+  fi
+
+  if [[ -f "$claude_env_file" ]]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$claude_env_file"
+    set -u
+    if [[ -n "${AMD_LLM_GATEWAY_KEY:-}" ]]; then
+      printf '%s' "$AMD_LLM_GATEWAY_KEY"
+      return
+    fi
+  fi
+
+  if [[ ! -t 0 ]]; then
+    IFS= read -r amd_key || true
+    if [[ -n "${amd_key:-}" ]]; then
+      printf '%s' "$amd_key"
+      return
+    fi
+  fi
+
+  printf 'AMD LLM Gateway API key: ' >&2
+  IFS= read -r -s amd_key
+  printf '\n' >&2
+  if [[ -z "$amd_key" ]]; then
+    echo "API key cannot be empty." >&2
+    exit 1
+  fi
+  printf '%s' "$amd_key"
+}
 
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "Node.js and npm are required." >&2
   exit 1
 fi
 
-printf 'AMD LLM Gateway API key: ' >&2
-IFS= read -r -s amd_key
-printf '\n' >&2
-if [[ -z "$amd_key" ]]; then
-  echo "API key cannot be empty." >&2
-  exit 1
-fi
+amd_key="$(resolve_amd_key)"
 
 mkdir -p "$codex_prefix" "${HOME}/.cache/npm-codex" "$config_dir"
 npm install -g \
@@ -55,17 +86,16 @@ EOF
 chmod 600 "$config_file"
 unset amd_key toml_key
 
-export PATH="${codex_prefix}/bin:${PATH}"
-if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
-  echo "Failed to add ~/.local/bin to PATH." >&2
-  exit 1
-fi
-
 shell_rc="${HOME}/.bashrc"
-path_line='export PATH="$HOME/.local/bin:$PATH"'
+if [[ -f "$shell_rc" ]] && ! bash -n "$shell_rc" 2>/dev/null; then
+  echo "Warning: ${shell_rc} has syntax errors; fix before relying on login shells." >&2
+fi
 if [[ ! -f "$shell_rc" ]] || ! grep -Fqx "$path_line" "$shell_rc"; then
   printf '\n%s\n' "$path_line" >>"$shell_rc"
 fi
+
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+hash -r
 
 "$codex_bin" --version
 "$codex_bin" --ask-for-approval never exec \
