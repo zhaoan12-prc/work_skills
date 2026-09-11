@@ -27,12 +27,17 @@ WORKER_DIR="$RUN_DIR/.worker"   # 只有真正拿到 claim 的作业会在里面
 STATE_DIR="$RUN_DIR/.keepalive_state"
 LOG="$RUN_DIR/keepalive.log"
 LOCK="$RUN_DIR/.keepalive.lock"
+FLOCK="$RUN_DIR/.keepalive.flock"   # flock 用独立文件：$LOCK 是下面 mkdir 的【目录】锁，两者不能同路径
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
 # 互斥：scrontab 和 keepalive_daemon.sh 很容易同时挂着（一个是调度器托管的，
 # 一个是登录节点的退路），两边每 3 分钟撞一次就会重复提交、并发回收 claim。
-# $LOCK 这个变量以前声明了却没人用 —— 现在真的用上。拿不到锁就安静让路。
-exec 9>"$LOCK" 2>/dev/null || true
+# 进程互斥必须使用普通文件，不能和下面 mkdir 使用的目录锁共用路径。
+# 打不开锁文件时直接失败；把坏 FD 当成“锁被占用”会掩盖 NFS/权限故障。
+if ! exec 9>"$FLOCK"; then
+  echo "[$(date -u +%FT%TZ)] 错误：无法打开 keepalive flock 文件 $FLOCK" >> "$LOG"
+  exit 1
+fi
 if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
   echo "[$(date -u +%FT%TZ)] 另一个 keepalive 正在跑，本次让路" >> "$LOG"
   exit 0
@@ -205,7 +210,8 @@ done
 # 有作业在干活时仍维持少量【待命路】：干活的作业随时可能被杀，届时队列里必须
 # 已经有人排着，否则要从队尾重排、白等几小时。但不维持全部 lane —— 待命路拿到
 # 节点会因 claim 被占而立即退出，频繁起落在共享集群上是无谓 churn。
-STANDBY_N=2
+# 2026-09-09 修：原来硬编码，会静默覆盖 runconf.sh 的设定
+STANDBY_N="${STANDBY_N:-2}"
 if [ -n "$WORKING" ]; then
   log "作业 $WORKING 正在干活，队列中 $N_QUEUED 路（仅维持前 $STANDBY_N 路待命）"
 fi

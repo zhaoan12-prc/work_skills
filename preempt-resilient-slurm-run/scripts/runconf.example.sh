@@ -6,6 +6,22 @@
 # RUN_DIR 必须在所有节点都能看到的共享盘上（NFS/Lustre）。
 # 它同时是：claim 锁的位置、任务队列的位置、日志的位置。
 RUN_DIR="${RUN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
+# ---- 计算节点上的身份与 PATH（必看）------------------------------------------
+# sbatch 作业【不一定以你的身份跑】。spur 上实测（2026-09-07，job 119956/119957）：
+#     HOME=/opt/spur   USER=root
+#     PATH=/opt/spur/bin:/opt/spur/.local/bin:/usr/local/sbin:/usr/local/bin:...
+# 于是任何写成 ${HOME}/bin 的 PATH 都指到 /opt/spur/bin，你装在 ~/bin 的
+# 命令一律 "command not found" —— 而且报错只出现在 .err 里，作业看起来
+# 「正常启动、几十秒后消失」，非常难查。
+#
+# 又因为 wrapper 脚本常常靠 $HOME 找配置（例：~/bin/claude 要读
+# ~/.claude/amd-gateway.env 拿网关 key），只改 PATH 不改 HOME 仍然会失败。
+#
+# 所以：把两者都【写死绝对路径】，不要用 ${HOME}。
+# （/home 一般是 NFS 挂载且没有 root_squash，root 读得到你的私有文件。）
+export HOME=/home/YOUR_USER
+export PATH="/home/YOUR_USER/bin:/home/YOUR_USER/.local/bin:${PATH}"
 LOG_DIR="$RUN_DIR/logs"
 
 # ---- 任务：作业拿到节点后到底跑什么 -------------------------------------------
@@ -40,6 +56,9 @@ TASK_MAX_ATTEMPTS=3
 # 别按 priority 分配 lane —— 按【实测落地时间】分配（SKILL.md 第 10 条）。
 # 被 GrpTRES 占满的高优先级 QOS，pending 原因是 QOSGrpNodeLimit，挂多少路都不会开始；
 # 把 lane 全押在真能落到节点的那个 QOS 上，哪怕它 priority 低、会被抢占。
+# 用户所属 account 可能被管理员调整。不要照抄旧 run 的 -A；装配后运行
+# `RUNCONF=/abs/path/runconf.sh bash preflight.sh`，逐条验证 account/QOS 关联。
+# 验证失败时应修改配置并重新检查，不能让脚本静默换到默认 account 或其他 QOS。
 LANES=(
   "myrun-hi|-A my-account   --qos=my-high-qos"
   "myrun-lo|-A my-account   --qos=my-burst-qos -t 720"
@@ -76,6 +95,7 @@ HEARTBEAT_SEC=60
 
 # ---- 补位与退避 --------------------------------------------------------------
 KEEPALIVE_PERIOD_SEC=180     # keepalive 多久跑一次（cron/daemon 的周期，写在这里供退避计算）
+KEEPALIVE_CYCLE_TIMEOUT_SEC=150  # 单轮 keepalive 超时；建议小于 PERIOD，防 NFS/sbatch 卡死守护循环
 INSTANT_DEATH_SEC=120        # 作业存活短于这个值算「到手即死」（被抢占/被清）
 BACKOFF_BASE_SEC=180         # 退避基数
 BACKOFF_MAX_SEC=3600         # 退避上限

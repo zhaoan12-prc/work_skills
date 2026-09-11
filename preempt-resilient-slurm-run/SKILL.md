@@ -23,7 +23,7 @@ description: Keeps a long-running job alive on a Slurm cluster that cancels or p
 - 补位有指数退避，不在共享集群上空转刷屏。
 - 收工只认哨兵文件，不认「某个产物存在」。
 
-## 十一条硬教训
+## 十二条硬教训
 
 每一条都对应一次真实事故。第 1、2、8 条是静默失败——不看日志你不会知道自己中招了。
 
@@ -170,8 +170,16 @@ bash preflight.sh                                   # 登录节点
 sbatch -N1 --wrap 'bash ~/myrun/preflight.sh --on-node'   # 计算节点
 ```
 
-重点看两处：计算节点有没有 `squeue`（决定第 2 条要不要紧）；
-QOS 表里 `PreemptMode=cancel` 和 `Priority`（决定退避要多凶）。
+重点看三处：计算节点有没有 `squeue`（决定第 2 条要不要紧）；
+QOS 表里 `PreemptMode=cancel` 和 `Priority`（决定退避要多凶）；当前用户实际关联的
+account/QOS（决定 lane 能不能提交）。装配好 `runconf.sh` 后再运行一次：
+
+```bash
+RUNCONF=/绝对路径/runconf.sh bash preflight.sh
+```
+
+它会逐条检查 `LANES` 中的 account/QOS。检查失败时修改 `runconf.sh` 并重跑，不能静默
+换到默认 account 或其他 QOS。
 
 然后改 `runconf.sh`：`LANES`（跨 QOS/account 挂几张彩票）、`run_task`（任务怎么跑）、
 `PREFLIGHT_GPU_FREE_GIB`（节点体检门槛）。
@@ -183,7 +191,7 @@ QOS 表里 `PreemptMode=cancel` 和 `Priority`（决定退避要多凶）。
 改完脚本先跑自测，不需要 GPU、不提交任何作业：
 
 ```bash
-bash selftest.sh          # 20 条断言，覆盖上面六条教训
+bash selftest.sh          # 覆盖 claim、队列、热备、节点体检和 account/QOS 的关键断言
 ```
 
 任务丢进 `queue/`，按文件名排序执行：
@@ -202,7 +210,8 @@ scrontab -e
 没有 scrontab 才用守护进程，并且**要有人定期确认它还活着**：
 
 ```bash
-nohup ./keepalive_daemon.sh >/dev/null 2>&1 &
+mkdir -p logs
+setsid nohup ./keepalive_daemon.sh >> logs/keepalive_daemon.err 2>&1 </dev/null &
 ps -p "$(cat .keepalive_daemon.pid)" || echo "死了，重拉"
 ```
 
@@ -418,6 +427,22 @@ RUNNING 的 lane 只可能是 worker。
 一般化的教训：**任何"代替别人证明他还活着"的机制，都必须有一个它无法续期的过期时间。**
 心跳的价值全在「停了就能判死」，一个永远不会停的心跳比没有心跳更糟——
 没有心跳还能 fail-closed 报警，永远新鲜的假心跳会让所有保护逻辑安静地站到错误的一边。
+
+### 12. account 是会变的；每次 run 都要重新验证 account/QOS 组合
+
+不要把上一次能提交的 `-A` 当成永久配置。管理员调整组归属后，旧 account 会被调度器
+直接拒绝；更危险的做法是看到拒绝后自动删掉 `-A` 或改用另一个 QOS，这会让任务进入
+完全不同的资源池，抢占、配额和计费语义也随之改变。
+
+`preflight.sh` 会列出当前用户的 account/QOS 关联。给它传入已装配的 `RUNCONF` 后，它还会
+逐条解析 `LANES` 中的 `-A/--account` 与 `-q/--qos`，确认二者出现在同一条用户关联里：
+
+```bash
+RUNCONF=/abs/path/runconf.sh bash preflight.sh
+```
+
+关联不存在时 preflight 必须非零退出。正确处理是让操作者显式更新 `runconf.sh` 后重试；
+skill 不替操作者猜新的 account，也不静默换 QOS。
 
 ## 已知毛刺
 

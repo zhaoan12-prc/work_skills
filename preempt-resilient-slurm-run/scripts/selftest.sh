@@ -1,6 +1,6 @@
 #!/bin/bash
 # selftest.sh —— 在【登录节点】跑，不需要 GPU、不需要提交任何作业。
-# 用假的 SLURM_JOB_ID 直接驱动 submit.sbatch，验证 5 条关键性质。
+# 用假的 SLURM_JOB_ID 直接驱动 submit.sbatch，并验证登录节点 preflight 的关键性质。
 #
 # 改完脚本先跑这个。它抓到过两个真 bug：
 #   - 心跳子 shell 里的 sleep 是孙子进程，kill 不到，会攥着作业 stdout 到超时
@@ -176,6 +176,46 @@ saw '判定已死，本作业接管' \
   || bad "带 note 的过期 claim 应可接管" "$(printf '%s' "$OUT" | head -3)"
 [ -f queue/done/c.sh ] && ok "接管后继续消费队列" || bad "接管后应消费队列" "c.sh 没进 done"
 cd /tmp && rm -rf "$T"
+
+
+echo "== 10. account/QOS preflight：拒绝旧 account，不擅自换队列 =="
+T="$(mktemp -d /tmp/prst-selftest.XXXXXX)"
+mkdir -p "$T/bin"
+cat > "$T/bin/sacctmgr" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"show qos"*)
+    echo 'amd-burst-qos|100||||4||cancel'
+    ;;
+  *)
+    cat <<'ROWS'
+User            Account              Admin      Default Acct         QOS                  Def QOS
+tester          amd-burst            None       amd-burst            amd-burst-qos        amd-burst-qos
+tester          amd-hyperloom-geak   None                            amd-hyperloom-geak-qos,amd-burst-qos amd-hyperloom-geak-qos
+ROWS
+    ;;
+esac
+EOF
+chmod +x "$T/bin/sacctmgr"
+cat > "$T/runconf-ok.sh" <<'EOF'
+LANES=("lane-ok|-A amd-hyperloom-geak --qos=amd-burst-qos -t 60")
+EOF
+OUT="$(PATH="$T/bin:$PATH" PREFLIGHT_SLURM_USER=tester RUNCONF="$T/runconf-ok.sh" bash "$HERE/preflight.sh" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '✓ lane lane-ok' \
+  && ok "当前 account/QOS 组合通过" \
+  || bad "当前 account/QOS 组合应通过" "rc=$RC out=$(printf '%s' "$OUT" | tail -5)"
+
+cat > "$T/runconf-bad.sh" <<'EOF'
+LANES=("lane-old|-A amd-hyperloom --qos=amd-burst-qos -t 60")
+EOF
+OUT="$(PATH="$T/bin:$PATH" PREFLIGHT_SLURM_USER=tester RUNCONF="$T/runconf-bad.sh" bash "$HERE/preflight.sh" 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q '不属于 account amd-hyperloom' \
+  && ok "旧 account 被拒绝且 preflight 非零退出" \
+  || bad "旧 account 应被拒绝" "rc=$RC out=$(printf '%s' "$OUT" | tail -5)"
+printf '%s' "$OUT" | grep -q '静默改用默认 account 或其他 QOS' \
+  && ok "失败信息禁止静默换 account/QOS" \
+  || bad "失败时应禁止静默换 account/QOS" "$(printf '%s' "$OUT" | tail -5)"
+rm -rf "$T"
 
 
 echo
