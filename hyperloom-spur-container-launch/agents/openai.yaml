@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hyperloom Spur Container Launch"
+  short_description: "Launch Hyperloom through Slurm spur and detached GPU containers"
+  default_prompt: "Set up or operate a Hyperloom matrix launcher using an existing Slurm allocation, spur exec, detached Docker, and in-container Claude setup."
