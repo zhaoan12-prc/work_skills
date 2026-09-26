@@ -1,0 +1,52 @@
+Geak e2e_workflow启动规范
+1.	准备阶段
+（代码、模型、prompt、输出目录）
+
+2.	创建容器
+（挂载好模型以及输出目录）
+
+3.	进入容器内部安装claude cli，配好API KEY
+使用skill安装好claude
+https://github.com/zhaoan12-prc/work_skills/blob/main/claude-amd-direct-setup/SKILL.md
+
+4.在容器内部终端指挥claude 跑e2e_workflow优化
+按照prompt运行geak 2e2_workflow
+
+
+
+Prompt：
+在当前容器，运行 GEAK 的 e2e_workflow，对 Qwen3.5-397B-A17B-FP8 执行一次从零开始的完整端到端优化。
+
+代码版本：
+  GEAK_REPO=/mnt/data/zhaoan12/GEAK
+  GEAK_BRANCH=rebase/kernel-fusion-tuning-skillset
+  EXPECTED_COMMIT=40383ce6cd7c0fd55388fa76fc665bc03ae297a6
+
+优化时间:Default 模式 优化24小时
+
+
+Workload：ISL=8192，OSL=1024，CONC=4，RANDOM_RANGE_RATIO=0.8，
+NUM_PROMPTS=40，NUM_WARMUPS=8。
+  BACKEND=sglang
+  TP=8
+  GPU_IDS=0,1,2,3,4,5,6,7
+
+Baseline 来自：
+  /mnt/data/zhaoan12/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_mi300x.sh
+
+不得修改 InferenceX 仓库或上述 Baseline 脚本。
+
+Baseline 环境：SGLANG_USE_AITER=1
+Baseline 参数：
+  --attention-backend aiter --trust-remote-code --tokenizer-worker-num 6
+  --enable-aiter-allreduce-fusion --cuda-graph-max-bs 4 --disable-radix-cache
+  --max-prefill-tokens 32768 --scheduler-recv-interval 30 --mem-fraction-static 0.75
+  --context-length 9236 --tensor-parallel-size 8 --data-parallel-size 1
+
+
+config_tune=false。
+
+输出：
+本次运行生成的所有结果、日志、trace、profile、overlay、报告和其他产物，必须全部存放在 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/20260924_test_e2e_qwen35 目录下。
+
+限制：不要读取 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/ 其他日期目录下的任何文件
