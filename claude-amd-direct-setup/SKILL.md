@@ -163,9 +163,13 @@ OK: SDK request answered via /root/bin/claude (model: claude-opus-5-5, claude-op
 Rules for programs that use the SDK:
 
 - Point the SDK at the wrapper: `ClaudeAgentOptions(cli_path="~/bin/claude")`
-  (expanded), or for GEAK `GEAK_CLAUDE_BIN=$HOME/bin/claude`. Otherwise it
-  spawns whatever `claude` comes first on `PATH`, and the raw binary has no AMD
-  headers.
+  (expanded), or for GEAK `GEAK_CLAUDE_BIN=$HOME/bin/claude`. Without
+  `cli_path` the SDK runs its own bundled CLI
+  (`claude_agent_sdk/_bundled/claude`, often an older version) and only falls
+  back to `PATH` when no bundled CLI exists. The bundled CLI reaches the AMD
+  gateway only if the program inherited `ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_CUSTOM_HEADERS`, which happens only when it was started from a
+  wrapper-launched Claude session.
 - With `--target`, append the directory to `sys.path`; never put it in front,
   or it can shadow the environment's own packages (pydantic, anyio, ...).
   Do not export it through `PYTHONPATH`, because child processes such as
@@ -173,7 +177,8 @@ Rules for programs that use the SDK:
 - After launch, check that the SDK path is really in use: the process tree
   shows `claude --output-format stream-json ... --model <id>` under the Python
   program, and the program's log grows. If you only see `claude -p`, the import
-  failed.
+  failed. The executable path in that line shows whether it is the wrapper or
+  the SDK's bundled CLI.
 
 ### 5. Inside a container
 
@@ -266,8 +271,8 @@ Validate shell startup files with `bash -n ~/.bashrc` after edits.
   needs Python >= 3.10. Use the program's own interpreter, not the system
   `python3`.
 - SDK requests fail with `Invalid API key` or missing-header errors while
-  `claude -p` works: the SDK spawned the raw binary. Pass
-  `cli_path=~/bin/claude` (expanded) or fix `PATH` order.
+  `claude -p` works: the SDK spawned its bundled CLI (or the raw binary)
+  without the wrapper's environment. Pass `cli_path=~/bin/claude` (expanded).
 - `claude: command not found` in a fresh container: `/root/.bashrc` lacks the
   `PATH` line from step 5.
 
