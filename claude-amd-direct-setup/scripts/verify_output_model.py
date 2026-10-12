@@ -5,7 +5,7 @@ import json
 import sys
 
 
-SUPPORTED = {"claude-sonnet-4.6", "claude-opus-4.6"}
+SUPPORTED = {"claude-sonnet-4.6", "claude-opus-4.6", "claude-opus-5.5"}
 
 
 def collect_model_usage(value, found):

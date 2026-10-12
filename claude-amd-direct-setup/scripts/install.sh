@@ -3,9 +3,9 @@ set -euo pipefail
 
 model="${1:-claude-sonnet-4.6}"
 case "$model" in
-  claude-sonnet-4.6|claude-opus-4.6) ;;
+  claude-sonnet-4.6|claude-opus-4.6|claude-opus-5.5) ;;
   *)
-    echo "Unsupported model: ${model}. Use claude-sonnet-4.6 or claude-opus-4.6." >&2
+    echo "Unsupported model: ${model}. Use claude-sonnet-4.6, claude-opus-4.6 or claude-opus-5.5." >&2
     exit 1
     ;;
 esac

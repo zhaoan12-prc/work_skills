@@ -49,7 +49,7 @@ else:
     helper = data.get("apiKeyHelper")
     if set(data) - allowed:
         print("extra_fields")
-    elif model not in {"claude-sonnet-4.6", "claude-opus-4.6"}:
+    elif model not in {"claude-sonnet-4.6", "claude-opus-4.6", "claude-opus-5.5"}:
         print("unsupported_model")
     elif not isinstance(helper, str) or "AMD_LLM_GATEWAY_KEY" not in helper:
         print("bad_helper")

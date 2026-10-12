@@ -1,6 +1,6 @@
 ---
 name: claude-amd-direct-setup
-description: Installs, configures, repairs, and verifies Claude Code against the direct AMD LLM Gateway. Use for AMD Gateway authentication, missing subscription-key errors, apiKeyHelper failures, wrong Claude entrypoints, upgrades that bypass wrappers, stale Claude binaries, broken bashrc login shells, missing user header errors, or claude -p diagnostics.
+description: Installs, configures, repairs, and verifies Claude Code against the direct AMD LLM Gateway. Use for AMD Gateway authentication, missing subscription-key errors, apiKeyHelper failures, wrong Claude entrypoints, upgrades that bypass wrappers, stale Claude binaries, broken bashrc login shells, missing user header errors, claude -p diagnostics, installing the Claude Agent SDK (claude_agent_sdk) for programs that drive Claude from Python, or setting Claude up inside a container.
 ---
 
 # Claude AMD Direct Setup
@@ -25,6 +25,9 @@ export AMD_LLM_GATEWAY_KEY
 
 - `~/.claude/settings.json` contains only `apiKeyHelper` and a supported model.
 - A real `claude -p` request succeeds.
+- When a Python program drives Claude (for example GEAK `run_e2e.py`),
+  `claude_agent_sdk` is importable by that program's interpreter and a real SDK
+  request through `~/bin/claude` succeeds.
 
 This layout is intentional. The official updater owns
 `~/.local/bin/claude`; putting the wrapper there causes the next update to
@@ -37,10 +40,15 @@ Use only:
 
 - `claude-sonnet-4.6` (default)
 - `claude-opus-4.6`
+- `claude-opus-5.5`
 
 Normalize `opus[1m]`, `claude-opus-4.5[1m]`, retired models, and unknown values
-to `claude-sonnet-4.6`, unless the user explicitly requests the supported Opus
+to `claude-sonnet-4.6`, unless the user explicitly requests a supported Opus
 model.
+
+The interactive banner may abbreviate `claude-opus-5.5` as "Opus 5". Copy model
+IDs from `settings.json` or from `modelUsage` in JSON output, never from the
+banner: `claude-opus-5` is a different ID.
 
 ## Safety rules
 
@@ -117,6 +125,81 @@ claude -p --output-format json 'Reply with exactly: API OK' |
   python3 work_skills/claude-amd-direct-setup/scripts/verify_output_model.py
 ```
 
+### 4. Install the Claude Agent SDK (when a program drives Claude from Python)
+
+`claude-agent-sdk` (import name `claude_agent_sdk`) is the official Python
+package for driving Claude Code from code. It does not talk to the API itself:
+it spawns the `claude` CLI and streams its messages, and it keeps the session
+alive until the agent's work is finished.
+
+Install it whenever a tool launches Claude from Python. GEAK `run_e2e.py` is
+the main case: it imports `claude_agent_sdk` and silently falls back to
+`claude -p` when the import fails. `claude -p` ends when the first answer ends,
+so a long background Workflow is torn down minutes after it starts. The result
+reports `workflow_parse_error`, and orphan serving processes may be left
+behind. A working `claude -p` therefore does not prove that the SDK path works.
+
+The SDK needs Python >= 3.10. Install it into the interpreter that will import
+it, and prove it with a real request:
+
+```bash
+# Normal environment
+bash work_skills/claude-amd-direct-setup/scripts/install_sdk.sh --python python3
+
+# Environment that must not change (e.g. /opt/venv in an sglang/vLLM image):
+# install beside it and append the directory to sys.path in the launcher.
+bash work_skills/claude-amd-direct-setup/scripts/install_sdk.sh \
+  --python /opt/venv/bin/python --target <run_dir>/_tooling/sdk_site
+```
+
+The script installs the package, imports it, then sends a real SDK request with
+`cli_path=~/bin/claude` and prints the models that answered. Success looks like:
+
+```text
+OK: import claude_agent_sdk 0.2.165 from <target>/claude_agent_sdk/__init__.py
+OK: SDK request answered via /root/bin/claude (model: claude-opus-5-5, claude-opus-5.5)
+```
+
+Rules for programs that use the SDK:
+
+- Point the SDK at the wrapper: `ClaudeAgentOptions(cli_path="~/bin/claude")`
+  (expanded), or for GEAK `GEAK_CLAUDE_BIN=$HOME/bin/claude`. Otherwise it
+  spawns whatever `claude` comes first on `PATH`, and the raw binary has no AMD
+  headers.
+- With `--target`, append the directory to `sys.path`; never put it in front,
+  or it can shadow the environment's own packages (pydantic, anyio, ...).
+  Do not export it through `PYTHONPATH`, because child processes such as
+  serving engines would inherit it.
+- After launch, check that the SDK path is really in use: the process tree
+  shows `claude --output-format stream-json ... --model <id>` under the Python
+  program, and the program's log grows. If you only see `claude -p`, the import
+  failed.
+
+### 5. Inside a container
+
+Containers start with a bare root home. Set up the same layout under `/root`:
+
+1. Copy the official binary to `/root/.local/share/claude/versions/<ver>` and
+   link it as `/root/.local/bin/claude`. A read-only mount of the host's
+   `~/.local/share/claude` is a convenient source.
+2. Copy the wrapper to `/root/bin/claude` (mode `700`), write
+   `/root/.claude/amd-gateway.env` (mode `600`) from the current key, and write
+   `/root/.claude/settings.json` as in this skill.
+3. Add `export PATH="$HOME/bin:$HOME/.local/bin:$PATH"` to `/root/.bashrc` and
+   `source` it. Without this the shell reports `claude: command not found`, or
+   runs the raw binary.
+4. Run `claude -p --output-format json 'Reply with exactly: API OK'` and check
+   `modelUsage`.
+5. Run `install_sdk.sh` (step 4) with the container's interpreter, using
+   `--target` when the image's environment must not change.
+6. For unattended work as root, start Claude with
+   `IS_SANDBOX=1 claude --dangerously-skip-permissions`. On first start, accept
+   the theme and security notes, and choose "Yes, I trust this folder" (the
+   default selection is "No, exit").
+
+Mount only what the work needs (working directory read-write, models and
+reference repositories read-only) instead of a whole data root.
+
 ## Manual config reference
 
 ### Secret file
@@ -174,6 +257,19 @@ Validate shell startup files with `bash -n ~/.bashrc` after edits.
 - Retired-model warning: normalize settings to a supported model, then restart.
 - Healthcheck shows `fragile_helper`: replace `bash -lc` apiKeyHelper with the
   env-file reader from this skill.
+- `ModuleNotFoundError: No module named 'claude_agent_sdk'`, or a launcher that
+  "falls back to claude -p": install the SDK for that interpreter (step 4).
+- A background Workflow dies minutes after launch and the result says
+  `workflow_parse_error`: the launcher used `claude -p` instead of the SDK.
+  Install the SDK, stop leftover child processes, and relaunch from scratch.
+- `claude-agent-sdk` fails to install or import on an old interpreter: it
+  needs Python >= 3.10. Use the program's own interpreter, not the system
+  `python3`.
+- SDK requests fail with `Invalid API key` or missing-header errors while
+  `claude -p` works: the SDK spawned the raw binary. Pass
+  `cli_path=~/bin/claude` (expanded) or fix `PATH` order.
+- `claude: command not found` in a fresh container: `/root/.bashrc` lacks the
+  `PATH` line from step 5.
 
 ## Completion checklist
 
@@ -188,4 +284,8 @@ Validate shell startup files with `bash -n ~/.bashrc` after edits.
 - [ ] Healthcheck passes.
 - [ ] A real text request succeeds.
 - [ ] Response model verification succeeds.
+- [ ] If a Python program drives Claude: `install_sdk.sh` passed for that
+      program's interpreter, including the real SDK request.
+- [ ] After launching such a program, the process tree shows the SDK-spawned
+      `claude --output-format stream-json`, not `claude -p`.
 - [ ] Existing Claude sessions were restarted.
