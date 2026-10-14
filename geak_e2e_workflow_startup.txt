@@ -1,26 +1,27 @@
 Geak e2e_workflow启动规范
-1.	准备阶段
-（代码、模型、prompt、输出目录）
 
-2.	创建容器
+准备阶段
+（代码、模型、prompt、输出目录）跑之前需要先按照自己的workload改好prompt里的路径之类的
+
+创建容器
 （挂载好模型以及输出目录）
 
-3.	进入容器内部安装claude cli，配好API KEY
+进入容器内部安装claude cli，配好API KEY
 使用skill安装好claude
 https://github.com/zhaoan12-prc/work_skills/blob/main/claude-amd-direct-setup/SKILL.md
 
-4.在容器内部终端指挥claude 跑e2e_workflow优化
-按照prompt运行geak 2e2_workflow
+在容器内部终端指挥claude 跑e2e_workflow优化
+按照prompt运行geak e2e_workflow
+（也可以指挥agent按"tmux →容器→ IS_SANDBOX=1 claude --dangerously-skip-permissions → 确保切到ops5.5 → 粘贴prompt"启动）
 
 
-
-Prompt：
+纯 geak Prompt：
 在当前容器，运行 GEAK 的 e2e_workflow，对 Qwen3.5-397B-A17B-FP8 执行一次从零开始的完整端到端优化。
 
 代码版本：
   GEAK_REPO=/mnt/data/zhaoan12/GEAK
-  GEAK_BRANCH=rebase/kernel-fusion-tuning-skillset
-  EXPECTED_COMMIT=40383ce6cd7c0fd55388fa76fc665bc03ae297a6
+  GEAK_BRANCH=rebase/kernel-fusion-20260928
+  EXPECTED_COMMIT=147259cc15f1a3ad13bba7423b712ada77124154
 
 优化时间:Default 模式 优化24小时
 
@@ -50,3 +51,35 @@ config_tune=false。
 本次运行生成的所有结果、日志、trace、profile、overlay、报告和其他产物，必须全部存放在 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/20260924_test_e2e_qwen35 目录下。
 
 限制：不要读取 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/ 其他日期目录下的任何文件
+
+
+HL + geak prompt
+
+按这个 skill 运行完整的 hyperloom 优化（HL + GEAK）：
+
+`/home/amd/zhaoan/hl_geak_20260926/qwen3-14b-fp8/Hyperloom/examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md`
+
+除下列覆盖项外，其余均严格按照 skill 执行。
+
+## 初始配置
+
+- 运行位置：当前容器内直接运行（HYPERLOOM_RUN_MODE=baremetal），不要新建或复用其他容器
+- 时间预算：24 小时（`--max-hours 24`）
+- target gain：200%（`--target-gain 200`）
+- GPU：MI300X（容器内 GPU 0、1）
+- Framework：SGLang
+- 模型：`Qwen/Qwen3-14B-FP8`
+- Precision：FP8
+- TP：1
+- CONC：64
+- ISL：1024
+- OSL：1024
+- Kernel backend：GEAK（`KERNEL_OPT_BACKEND_ORDER=geak`，KERNEL_AGENT 阶段交给 GEAK；不要使用 KernelForge）
+- LLM：`claude-opus-5.5`（`CLAUDE_MODEL` 与 `GEAK_CLAUDE_MODEL` 都用这个）；AMD gateway `https://llm-api.amd.com/Anthropic`，key 使用 `/root/.claude/amd-gateway.env` 中的 `AMD_LLM_GATEWAY_KEY`，不要打印 key
+
+## 路径配置
+
+- Hyperloom：`/home/amd/zhaoan/hl_geak_20260926/qwen3-14b-fp8/Hyperloom`（main @ 3dee91e8f60a3c15ad7b79a9c828c3eb579897cc）
+- GEAK（`GEAK_ROOT`，KERNEL_AGENT 必须使用这个目录）：`/home/amd/zhaoan/hl_geak_20260926/qwen3-14b-fp8/GEAK`（rebase/kernel-fusion-tuning-skillset @ 40383ce6cd7c0fd55388fa76fc665bc03ae297a6）
+- 模型路径：`/mnt/nvme2n1/amd/models/Qwen3-14B-FP8`（已下载，直接使用，不需要询问或重新下载）
+- 结果目录（USER_DATA_PATH）：`/home/amd/zhaoan/hl_geak_20260926/qwen3-14b-fp8/results`
