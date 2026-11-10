@@ -12,7 +12,7 @@ https://github.com/zhaoan12-prc/work_skills/blob/main/claude-amd-direct-setup/SK
 
 在容器内部终端指挥claude 跑e2e_workflow优化
 按照prompt运行geak e2e_workflow
-（也可以指挥agent按"tmux →容器→ IS_SANDBOX=1 claude --dangerously-skip-permissions → 确保切到ops5.5 → 粘贴prompt"启动）
+（即：指挥agent按"tmux →容器→ IS_SANDBOX=1 claude --dangerously-skip-permissions → 确保切到ops5.5 → 粘贴prompt"启动）
 
 
 纯 geak Prompt：
