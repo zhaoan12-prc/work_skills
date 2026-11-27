@@ -48,6 +48,8 @@ Baseline 参数：
 输出：
 本次运行生成的所有结果、日志、trace、profile、overlay、报告和其他产物，必须全部存放在 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/20260924_test_e2e_qwen35 目录下。
 
+限制：不要读取 /mnt/data/zhaoan12/geak_e2e_workflow_test/Qwen35/ 其他日期目录下的任何文件
+
 
 HL + geak prompt
 
